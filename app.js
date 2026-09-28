@@ -15,12 +15,13 @@ let fotoCapturada = null;
 let fotoEditCapturada = null;
 let fotoControlCapturada = null;
 
-// ============ HISTORIAL INTERNO DE NAVEGACIÓN ============
-// Pila de estados: cada elemento es { pantalla, vista, params }
-// "vista" es el nombre de la función que renderiza el contenido
-// Se usa para regresar sin salir del sistema
+// ============ HISTORIAL INTERNO DE NAVEGACIÓN (SISTEMA ROBUSTO) ============
+// Cada elemento: { vista, params }
+// El historial del NAVEGADOR solo tiene UNA entrada base.
+// NO se hace pushState por cada navegación, solo se simula con popstate.
 let historialInterno = [];
-let ignorarPopstate = false; // Bandera para evitar loops
+let navegandoAtras = false;   // Bandera: evita re-procesar popstate durante regreso programático
+let sesionActiva = false;     // Bandera: bloquea cierre de PWA mientras hay sesión
 
 // ============ FECHAS Y HORAS ============
 function obtenerFechaActual() {
@@ -40,64 +41,57 @@ function obtenerFechaHoraActual() {
     };
 }
 
-// ============ CONTROL DE HISTORIAL ============
+// ============ CONTROL DE HISTORIAL (NUEVA IMPLEMENTACIÓN) ============
+
 /**
- * Empuja un estado al historial interno y al historial del navegador
- * @param {string} vista - Nombre de la función que renderiza el contenido
- * @param {object} params - Parámetros opcionales para la vista
+ * Empuja una vista al historial interno.
+ * NO toca el historial del navegador.
  */
 function empujarHistorial(vista, params = {}) {
-    // Si estamos cambiando pantalla (login → main), reiniciar historial
-    if (vista === 'dashboard') {
-        historialInterno = [{ vista: 'dashboard', params: {} }];
-    } else {
-        historialInterno.push({ vista, params });
+    const ultimo = historialInterno[historialInterno.length - 1];
+    // Si la vista es la misma que la última, no duplicar
+    if (ultimo && ultimo.vista === vista && JSON.stringify(ultimo.params) === JSON.stringify(params)) {
+        return;
     }
-    
-    // Empujar al historial del navegador para interceptar el botón "atrás"
-    try {
-        window.history.pushState(
-            { internalIndex: historialInterno.length - 1, vista },
-            '',
-            window.location.href
-        );
-    } catch (e) {
-        console.warn('⚠️ No se pudo empujar estado:', e);
-    }
-    
-    console.log('📚 Historial:', historialInterno.map(h => h.vista).join(' → '));
+    historialInterno.push({ vista, params });
+    console.log('📚 Historial interno:', historialInterno.map(h => h.vista).join(' → '));
 }
 
 /**
- * Regresa a la vista anterior del historial interno
- * @returns {boolean} true si se pudo regresar, false si ya estamos en el inicio
+ * Regresa una vista atrás en el historial interno.
+ * @returns {boolean} true si regresó, false si ya está en la raíz
  */
 function regresarEnHistorial() {
     if (historialInterno.length <= 1) {
-        return false; // Ya estamos en el dashboard
+        return false; // Ya estamos en la raíz (dashboard)
     }
     
     // Quitar la vista actual
     historialInterno.pop();
     
-    // Obtener la anterior
+    // Obtener la vista anterior
     const anterior = historialInterno[historialInterno.length - 1];
     if (!anterior) return false;
     
-    // Renderizar la vista anterior SIN empujar al historial de nuevo
-    ignorarPopstate = true;
-    ejecutarVista(anterior.vista, anterior.params);
-    setTimeout(() => { ignorarPopstate = false; }, 100);
+    console.log('⬅️ Regresando a:', anterior.vista);
+    
+    // Renderizar la vista anterior
+    navegandoAtras = true;
+    try {
+        ejecutarVista(anterior.vista, anterior.params);
+    } finally {
+        // Liberar la bandera en el siguiente tick para no bloquear renders
+        setTimeout(() => { navegandoAtras = false; }, 0);
+    }
     
     return true;
 }
 
 /**
- * Ejecuta una vista por su nombre (función global)
+ * Ejecuta una vista por su nombre.
  */
 function ejecutarVista(vista, params = {}) {
     try {
-        // Mapeo de vistas a funciones
         const funciones = {
             'dashboard': renderizarDashboard,
             'control': mostrarControl,
@@ -117,92 +111,102 @@ function ejecutarVista(vista, params = {}) {
         
         const fn = funciones[vista];
         if (typeof fn === 'function') {
-            const resultado = fn();
-            // Si la función devuelve una promesa, manejarla
-            if (resultado && typeof resultado.catch === 'function') {
-                resultado.catch(err => console.error(`❌ Error en vista ${vista}:`, err));
+            const r = fn();
+            if (r && typeof r.catch === 'function') {
+                r.catch(err => console.error(`❌ Error vista ${vista}:`, err));
             }
         } else {
             console.warn('⚠️ Vista no encontrada:', vista);
             renderizarDashboard();
         }
     } catch (error) {
-        console.error(`❌ Error ejecutando vista ${vista}:`, error);
+        console.error(`❌ Error vista ${vista}:`, error);
         renderizarDashboard();
     }
 }
 
 /**
- * Manejo del botón "atrás" del navegador
- * Intercepta el popstate para navegar dentro del sistema
+ * Inicializa el sistema de historial:
+ *  1. Empuja UN estado base al historial del navegador (para "capturar" el primer atrás)
+ *  2. Configura el listener popstate para navegar DENTRO del sistema
+ *  3. Bloquea el cierre de la PWA con beforeunload
  */
 function initBackButtonHandler() {
-    // Empujar estado inicial para "capturar" el primer atrás
+    // Empujar estado base UNA sola vez
     try {
-        window.history.pushState(
-            { internalIndex: 0, vista: 'dashboard' },
-            '',
-            window.location.href
-        );
+        window.history.pushState({ base: true }, '', window.location.href);
     } catch (e) {
-        console.warn('⚠️ No se pudo inicializar historial:', e);
+        console.warn('⚠️ pushState inicial falló:', e);
     }
     
+    // popstate: SIEMPRE navega dentro del sistema, NUNCA re-empuja
     window.addEventListener('popstate', async (e) => {
-        // Si estamos ignorando popstate (regreso programático), no hacer nada
-        if (ignorarPopstate) {
+        // Solo actuar si hay sesión activa
+        if (!sesionActiva || !currentUser) {
             return;
         }
         
-        // Si estamos en login, no hay historial interno que manejar
-        if (pantallaActual === 'login') {
-            return;
-        }
-        
-        // Si estamos en el dashboard y presionan atrás → preguntar salir
+        // Si ya estamos en el dashboard (raíz), preguntar si salir
         if (historialInterno.length <= 1) {
-            const confirmar = confirm('⚠️ ¿Seguro que quieres salir del sistema?\nLos datos están guardados.');
+            const confirmar = confirm(
+                '⚠️ ¿Seguro que quieres salir del sistema?\n\n' +
+                'Los datos están guardados correctamente.'
+            );
+            
             if (confirmar) {
-                await backupAutomatico(true);
-                await logout();
-                mostrarPantalla('login');
-                historialInterno = [];
-            } else {
-                // Re-empujar el estado para "cancelar" el atrás
+                // Salir del sistema
+                sesionActiva = false;
                 try {
-                    window.history.pushState(
-                        { internalIndex: 0, vista: 'dashboard' },
-                        '',
-                        window.location.href
-                    );
+                    await backupAutomatico(true);
+                    await logout();
                 } catch (err) {
-                    console.warn('⚠️ No se pudo re-empujar estado:', err);
+                    console.warn('⚠️ Error al cerrar sesión:', err);
+                }
+                historialInterno = [];
+                mostrarPantalla('login');
+            } else {
+                // Canceló: re-empujar estado base para "bloquear" el atrás
+                try {
+                    window.history.pushState({ base: true }, '', window.location.href);
+                } catch (err) {
+                    console.warn('⚠️ No se pudo re-empujar:', err);
                 }
             }
             return;
         }
         
         // Navegar hacia atrás dentro del sistema
-        regresarEnHistorial();
+        const regreso = regresarEnHistorial();
         
-        // Re-empujar el estado actual para que el siguiente "atrás" funcione
-        try {
-            window.history.pushState(
-                { internalIndex: historialInterno.length - 1, vista: historialInterno[historialInterno.length - 1].vista },
-                '',
-                window.location.href
-            );
-        } catch (err) {
-            console.warn('⚠️ No se pudo re-empujar estado:', err);
+        // CRÍTICO: Re-empujar estado base DESPUÉS del regreso para que el
+        // siguiente atrás funcione también. Esto es lo que se me había olvidado.
+        if (regreso) {
+            try {
+                window.history.pushState({ base: true }, '', window.location.href);
+            } catch (err) {
+                console.warn('⚠️ No se pudo re-empujar tras regreso:', err);
+            }
         }
     });
+    
+    // beforeunload: bloquea cierre accidental de la PWA mientras hay sesión
+    window.addEventListener('beforeunload', (e) => {
+        if (sesionActiva && currentUser) {
+            // En algunos navegadores esto muestra diálogo de confirmación
+            e.preventDefault();
+            e.returnValue = '';
+            return '';
+        }
+    });
+    
+    console.log('✅ Sistema de historial inicializado');
 }
 
 // ============ NAVEGACIÓN ============
 function volverAlInicio() {
     if (currentUser) {
         // Limpiar historial y volver al dashboard
-        historialInterno = [];
+        historialInterno = [{ vista: 'dashboard', params: {} }];
         renderizarDashboard();
     } else {
         mostrarPantalla('login');
@@ -315,6 +319,30 @@ function comprimirImagenOptimizada(file, maxWidth = 480, maxHeight = 480, calida
 function renderVirtualScroll(container, items, renderItem, itemHeight = 70) {
     if (!container) return;
     
+    // Evitar duplicar listeners
+    if (container._vsInitialized) {
+        // Solo re-renderizar
+        _dibujarVirtualScroll(container, items, renderItem, itemHeight);
+        return;
+    }
+    
+    container._vsInitialized = true;
+    container._vsData = { items, renderItem, itemHeight };
+    
+    _dibujarVirtualScroll(container, items, renderItem, itemHeight);
+    
+    let timeout;
+    container.addEventListener('scroll', () => {
+        clearTimeout(timeout);
+        timeout = setTimeout(() => {
+            _dibujarVirtualScroll(container, items, renderItem, itemHeight);
+        }, 50);
+    });
+}
+
+function _dibujarVirtualScroll(container, items, renderItem, itemHeight) {
+    if (!container) return;
+    
     const totalHeight = items.length * itemHeight;
     const containerHeight = container.clientHeight || 400;
     const startIndex = Math.floor(container.scrollTop / itemHeight);
@@ -339,14 +367,6 @@ function renderVirtualScroll(container, items, renderItem, itemHeight = 70) {
     }
     
     container.appendChild(wrapper);
-    
-    let timeout;
-    container.addEventListener('scroll', () => {
-        clearTimeout(timeout);
-        timeout = setTimeout(() => {
-            renderVirtualScroll(container, items, renderItem, itemHeight);
-        }, 50);
-    });
 }
 
 // ============ OBSERVACIONES ============
@@ -472,7 +492,6 @@ async function backupAutomatico(force = false) {
 function iniciarBackupsAutomaticos() {
     setTimeout(() => backupAutomatico(true), 3000);
     setInterval(() => backupAutomatico(false), 12 * 60 * 60 * 1000);
-    window.addEventListener('beforeunload', () => backupAutomatico(true));
     console.log('🔄 Backup automático activado');
 }
 
@@ -960,11 +979,16 @@ function mostrarPantalla(pantalla) {
     
     if (pantalla === 'login') {
         document.getElementById('login-screen').classList.add('active');
-        // Limpiar historial al volver al login
         historialInterno = [];
+        sesionActiva = false;
     } else if (pantalla === 'main') {
         document.getElementById('main-screen').classList.add('active');
         actualizarInfoUsuario();
+        sesionActiva = true;
+        
+        // Inicializar historial interno con el dashboard como raíz
+        historialInterno = [{ vista: 'dashboard', params: {} }];
+        
         renderizarDashboard().catch(err => {
             console.error('❌ Dashboard error:', err);
             document.getElementById('main-content').innerHTML = 
@@ -994,8 +1018,6 @@ async function manejarLogin() {
         await login(username, password);
         document.getElementById('username').value = '';
         document.getElementById('password').value = '';
-        // Reiniciar historial al entrar
-        historialInterno = [];
         mostrarPantalla('main');
     } catch (error) {
         alert('❌ ' + error.message);
@@ -1005,6 +1027,7 @@ async function manejarLogin() {
 async function manejarLogout() {
     await backupAutomatico(true);
     await logout();
+    sesionActiva = false;
     historialInterno = [];
     mostrarPantalla('login');
 }
@@ -1030,12 +1053,12 @@ function actualizarReloj() {
 
 // ============ DASHBOARD ============
 async function renderizarDashboard() {
-    const contenido = document.getElementById('main-content');
-    
-    // Reiniciar historial solo si venimos de login o de logout
+    // Asegurar que el dashboard sea la raíz del historial
     if (historialInterno.length === 0) {
         historialInterno = [{ vista: 'dashboard', params: {} }];
     }
+    
+    const contenido = document.getElementById('main-content');
     
     try {
         const fichajes = await getAllFichajes();
@@ -1179,16 +1202,12 @@ async function renderizarDashboard() {
 
 // ============ MÓDULO CONTROL ============
 async function mostrarControl() {
-    // Empujar al historial SOLO si no venimos de un regreso
-    if (!ignorarPopstate) {
-        const ultimo = historialInterno[historialInterno.length - 1];
-        if (!ultimo || ultimo.vista !== 'control') {
-            empujarHistorial('control');
-        }
+    // Empujar al historial SOLO si NO estamos regresando
+    if (!navegandoAtras) {
+        empujarHistorial('control');
     }
     
     const contenido = document.getElementById('main-content');
-    
     const pendientesCount = await contarObservacionesPendientes();
     
     contenido.innerHTML = `
@@ -1311,6 +1330,9 @@ function renderizarResultadosBusqueda(personal, termino = '') {
         return;
     }
     
+    // Resetear el flag de virtual scroll si la lista cambió
+    lista._vsInitialized = false;
+    
     renderVirtualScroll(lista, personal, (item, index) => {
         const div = document.createElement('div');
         div.className = 'list-item';
@@ -1334,8 +1356,7 @@ function renderizarResultadosBusqueda(personal, termino = '') {
 
 // ============ NUEVO PERSONAL DESDE CONTROL ============
 function nuevoPersonalDesdeControl() {
-    // Empujar historial
-    if (!ignorarPopstate) {
+    if (!navegandoAtras) {
         empujarHistorial('nuevoPersonalControl');
     }
     
@@ -1595,11 +1616,8 @@ async function confirmarFichajeConMotivo(empleadoId, tipo) {
 
 // ============ MÓDULO DENTRO ============
 async function mostrarDentro() {
-    if (!ignorarPopstate) {
-        const ultimo = historialInterno[historialInterno.length - 1];
-        if (!ultimo || ultimo.vista !== 'dentro') {
-            empujarHistorial('dentro');
-        }
+    if (!navegandoAtras) {
+        empujarHistorial('dentro');
     }
     
     const contenido = document.getElementById('main-content');
@@ -1646,11 +1664,8 @@ async function mostrarDentro() {
 
 // ============ MÓDULO REPORTES ============
 async function mostrarReportes() {
-    if (!ignorarPopstate) {
-        const ultimo = historialInterno[historialInterno.length - 1];
-        if (!ultimo || ultimo.vista !== 'reportes') {
-            empujarHistorial('reportes');
-        }
+    if (!navegandoAtras) {
+        empujarHistorial('reportes');
     }
     
     const contenido = document.getElementById('main-content');
@@ -1919,11 +1934,8 @@ function imprimirReporte() {
 
 // ============ MÓDULO PERSONAL ============
 async function mostrarPersonal() {
-    if (!ignorarPopstate) {
-        const ultimo = historialInterno[historialInterno.length - 1];
-        if (!ultimo || ultimo.vista !== 'personal') {
-            empujarHistorial('personal');
-        }
+    if (!navegandoAtras) {
+        empujarHistorial('personal');
     }
     
     const contenido = document.getElementById('main-content');
@@ -1975,8 +1987,7 @@ async function verPersonal(empleadoId) {
         const empleado = await getEmpleado(empleadoId);
         const contenido = document.getElementById('main-content');
         
-        // Empujar historial
-        if (!ignorarPopstate) {
+        if (!navegandoAtras) {
             empujarHistorial('verPersonal', { id: empleadoId });
         }
         
@@ -2001,7 +2012,7 @@ async function verPersonal(empleadoId) {
 }
 
 function nuevoPersonal() {
-    if (!ignorarPopstate) {
+    if (!navegandoAtras) {
         empujarHistorial('nuevoPersonal');
     }
     
@@ -2085,7 +2096,6 @@ async function guardarNuevoPersonal() {
         fotoCapturada = null;
         mostrarNotificacion(`✅ Personal creado: ${nombre}`);
         
-        // Volver a personal
         if (historialInterno.length > 1) {
             historialInterno.pop();
         }
@@ -2106,7 +2116,7 @@ async function editarPersonal(empleadoId) {
         const contenido = document.getElementById('main-content');
         fotoEditCapturada = null;
         
-        if (!ignorarPopstate) {
+        if (!navegandoAtras) {
             empujarHistorial('editarPersonal', { id: empleadoId });
         }
         
@@ -2194,7 +2204,6 @@ async function guardarEdicionPersonal(empleadoId) {
         
         mostrarNotificacion(`✅ Actualizado: ${nombre}`);
         
-        // Volver a personal
         if (historialInterno.length > 1) {
             historialInterno.pop();
         }
@@ -2234,7 +2243,6 @@ async function eliminarPersonal(empleadoId) {
         
         mostrarNotificacion(`✅ Eliminado: ${empleado.nombre}`);
         
-        // Volver a personal
         if (historialInterno.length > 1) {
             historialInterno.pop();
         }
@@ -2246,11 +2254,8 @@ async function eliminarPersonal(empleadoId) {
 
 // ============ MÓDULO OBSERVADOS ============
 async function mostrarObservados() {
-    if (!ignorarPopstate) {
-        const ultimo = historialInterno[historialInterno.length - 1];
-        if (!ultimo || ultimo.vista !== 'observados') {
-            empujarHistorial('observados');
-        }
+    if (!navegandoAtras) {
+        empujarHistorial('observados');
     }
     
     const contenido = document.getElementById('main-content');
@@ -2323,6 +2328,8 @@ async function renderizarListaObservados(observaciones) {
         lista.innerHTML = '<div class="list-item">No hay observaciones con estos filtros</div>';
         return;
     }
+    
+    lista._vsInitialized = false; // Reset para nueva data
     
     renderVirtualScroll(lista, ordenadas, (item) => {
         const div = document.createElement('div');
@@ -2451,7 +2458,7 @@ async function verObservacion(observacionId) {
         const contenido = document.getElementById('main-content');
         const esAdmin = currentUser.rol === 'admin';
         
-        if (!ignorarPopstate) {
+        if (!navegandoAtras) {
             empujarHistorial('verObservacion', { id: observacionId });
         }
         
@@ -2529,7 +2536,6 @@ async function resolverObservacionConNota(observacionId) {
         
         mostrarNotificacion('✅ Observación resuelta');
         
-        // Volver a observados
         if (historialInterno.length > 1) {
             historialInterno.pop();
         }
@@ -2546,11 +2552,8 @@ async function mostrarSeguridad() {
         return;
     }
     
-    if (!ignorarPopstate) {
-        const ultimo = historialInterno[historialInterno.length - 1];
-        if (!ultimo || ultimo.vista !== 'seguridad') {
-            empujarHistorial('seguridad');
-        }
+    if (!navegandoAtras) {
+        empujarHistorial('seguridad');
     }
     
     const contenido = document.getElementById('main-content');
@@ -2824,7 +2827,7 @@ async function editarOperador(operadorId) {
         return;
     }
     
-    if (!ignorarPopstate) {
+    if (!navegandoAtras) {
         empujarHistorial('editarOperador', { id: operadorId });
     }
     
@@ -2978,7 +2981,7 @@ async function cambiarRol(operadorId) {
 }
 
 function nuevoOperador() {
-    if (!ignorarPopstate) {
+    if (!navegandoAtras) {
         empujarHistorial('nuevoOperador');
     }
     
@@ -3283,6 +3286,7 @@ async function reiniciarSistema() {
         currentUser = null;
         currentSession = null;
         historialInterno = [];
+        sesionActiva = false;
         mostrarPantalla('login');
     } catch (error) {
         console.error('❌ Error:', error);
