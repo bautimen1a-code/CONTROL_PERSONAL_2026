@@ -15,6 +15,13 @@ let fotoCapturada = null;
 let fotoEditCapturada = null;
 let fotoControlCapturada = null;
 
+// ============ HISTORIAL INTERNO DE NAVEGACIÓN ============
+// Pila de estados: cada elemento es { pantalla, vista, params }
+// "vista" es el nombre de la función que renderiza el contenido
+// Se usa para regresar sin salir del sistema
+let historialInterno = [];
+let ignorarPopstate = false; // Bandera para evitar loops
+
 // ============ FECHAS Y HORAS ============
 function obtenerFechaActual() {
     const ahora = new Date();
@@ -33,9 +40,169 @@ function obtenerFechaHoraActual() {
     };
 }
 
+// ============ CONTROL DE HISTORIAL ============
+/**
+ * Empuja un estado al historial interno y al historial del navegador
+ * @param {string} vista - Nombre de la función que renderiza el contenido
+ * @param {object} params - Parámetros opcionales para la vista
+ */
+function empujarHistorial(vista, params = {}) {
+    // Si estamos cambiando pantalla (login → main), reiniciar historial
+    if (vista === 'dashboard') {
+        historialInterno = [{ vista: 'dashboard', params: {} }];
+    } else {
+        historialInterno.push({ vista, params });
+    }
+    
+    // Empujar al historial del navegador para interceptar el botón "atrás"
+    try {
+        window.history.pushState(
+            { internalIndex: historialInterno.length - 1, vista },
+            '',
+            window.location.href
+        );
+    } catch (e) {
+        console.warn('⚠️ No se pudo empujar estado:', e);
+    }
+    
+    console.log('📚 Historial:', historialInterno.map(h => h.vista).join(' → '));
+}
+
+/**
+ * Regresa a la vista anterior del historial interno
+ * @returns {boolean} true si se pudo regresar, false si ya estamos en el inicio
+ */
+function regresarEnHistorial() {
+    if (historialInterno.length <= 1) {
+        return false; // Ya estamos en el dashboard
+    }
+    
+    // Quitar la vista actual
+    historialInterno.pop();
+    
+    // Obtener la anterior
+    const anterior = historialInterno[historialInterno.length - 1];
+    if (!anterior) return false;
+    
+    // Renderizar la vista anterior SIN empujar al historial de nuevo
+    ignorarPopstate = true;
+    ejecutarVista(anterior.vista, anterior.params);
+    setTimeout(() => { ignorarPopstate = false; }, 100);
+    
+    return true;
+}
+
+/**
+ * Ejecuta una vista por su nombre (función global)
+ */
+function ejecutarVista(vista, params = {}) {
+    try {
+        // Mapeo de vistas a funciones
+        const funciones = {
+            'dashboard': renderizarDashboard,
+            'control': mostrarControl,
+            'dentro': mostrarDentro,
+            'reportes': mostrarReportes,
+            'personal': mostrarPersonal,
+            'observados': mostrarObservados,
+            'seguridad': mostrarSeguridad,
+            'verPersonal': () => verPersonal(params.id),
+            'editarPersonal': () => editarPersonal(params.id),
+            'nuevoPersonal': nuevoPersonal,
+            'nuevoPersonalControl': nuevoPersonalDesdeControl,
+            'verObservacion': () => verObservacion(params.id),
+            'nuevoOperador': nuevoOperador,
+            'editarOperador': () => editarOperador(params.id)
+        };
+        
+        const fn = funciones[vista];
+        if (typeof fn === 'function') {
+            const resultado = fn();
+            // Si la función devuelve una promesa, manejarla
+            if (resultado && typeof resultado.catch === 'function') {
+                resultado.catch(err => console.error(`❌ Error en vista ${vista}:`, err));
+            }
+        } else {
+            console.warn('⚠️ Vista no encontrada:', vista);
+            renderizarDashboard();
+        }
+    } catch (error) {
+        console.error(`❌ Error ejecutando vista ${vista}:`, error);
+        renderizarDashboard();
+    }
+}
+
+/**
+ * Manejo del botón "atrás" del navegador
+ * Intercepta el popstate para navegar dentro del sistema
+ */
+function initBackButtonHandler() {
+    // Empujar estado inicial para "capturar" el primer atrás
+    try {
+        window.history.pushState(
+            { internalIndex: 0, vista: 'dashboard' },
+            '',
+            window.location.href
+        );
+    } catch (e) {
+        console.warn('⚠️ No se pudo inicializar historial:', e);
+    }
+    
+    window.addEventListener('popstate', async (e) => {
+        // Si estamos ignorando popstate (regreso programático), no hacer nada
+        if (ignorarPopstate) {
+            return;
+        }
+        
+        // Si estamos en login, no hay historial interno que manejar
+        if (pantallaActual === 'login') {
+            return;
+        }
+        
+        // Si estamos en el dashboard y presionan atrás → preguntar salir
+        if (historialInterno.length <= 1) {
+            const confirmar = confirm('⚠️ ¿Seguro que quieres salir del sistema?\nLos datos están guardados.');
+            if (confirmar) {
+                await backupAutomatico(true);
+                await logout();
+                mostrarPantalla('login');
+                historialInterno = [];
+            } else {
+                // Re-empujar el estado para "cancelar" el atrás
+                try {
+                    window.history.pushState(
+                        { internalIndex: 0, vista: 'dashboard' },
+                        '',
+                        window.location.href
+                    );
+                } catch (err) {
+                    console.warn('⚠️ No se pudo re-empujar estado:', err);
+                }
+            }
+            return;
+        }
+        
+        // Navegar hacia atrás dentro del sistema
+        regresarEnHistorial();
+        
+        // Re-empujar el estado actual para que el siguiente "atrás" funcione
+        try {
+            window.history.pushState(
+                { internalIndex: historialInterno.length - 1, vista: historialInterno[historialInterno.length - 1].vista },
+                '',
+                window.location.href
+            );
+        } catch (err) {
+            console.warn('⚠️ No se pudo re-empujar estado:', err);
+        }
+    });
+}
+
 // ============ NAVEGACIÓN ============
 function volverAlInicio() {
     if (currentUser) {
+        // Limpiar historial y volver al dashboard
+        historialInterno = [];
         renderizarDashboard();
     } else {
         mostrarPantalla('login');
@@ -73,25 +240,6 @@ function toggleFullscreen() {
             document.exitFullscreen();
             modoFullscreen = false;
         }
-    }
-}
-
-// ============ BOTÓN ATRÁS ============
-function initBackButtonHandler() {
-    if (window.history && window.history.pushState) {
-        window.history.pushState(null, '', window.location.href);
-        
-        window.addEventListener('popstate', async (e) => {
-            if (pantallaActual !== 'login' && currentUser) {
-                if (confirm('⚠️ ¿Seguro que quieres salir?\nLos datos están guardados.')) {
-                    await backupAutomatico(true);
-                    await logout();
-                    mostrarPantalla('login');
-                } else {
-                    window.history.pushState(null, '', window.location.href);
-                }
-            }
-        });
     }
 }
 
@@ -161,29 +309,6 @@ function comprimirImagenOptimizada(file, maxWidth = 480, maxHeight = 480, calida
         reader.onerror = reject;
         reader.readAsDataURL(file);
     });
-}
-
-function initLazyLoading() {
-    if ('IntersectionObserver' in window) {
-        const observer = new IntersectionObserver((entries) => {
-            entries.forEach(entry => {
-                if (entry.isIntersecting) {
-                    const img = entry.target;
-                    const src = img.dataset.src;
-                    if (src) {
-                        img.src = src;
-                        img.classList.remove('lazy');
-                        img.classList.add('loaded');
-                        observer.unobserve(img);
-                    }
-                }
-            });
-        }, { rootMargin: '100px', threshold: 0.1 });
-        
-        document.querySelectorAll('img.lazy').forEach(img => observer.observe(img));
-        return observer;
-    }
-    return null;
 }
 
 // ============ VIRTUAL SCROLL ============
@@ -835,6 +960,8 @@ function mostrarPantalla(pantalla) {
     
     if (pantalla === 'login') {
         document.getElementById('login-screen').classList.add('active');
+        // Limpiar historial al volver al login
+        historialInterno = [];
     } else if (pantalla === 'main') {
         document.getElementById('main-screen').classList.add('active');
         actualizarInfoUsuario();
@@ -867,6 +994,8 @@ async function manejarLogin() {
         await login(username, password);
         document.getElementById('username').value = '';
         document.getElementById('password').value = '';
+        // Reiniciar historial al entrar
+        historialInterno = [];
         mostrarPantalla('main');
     } catch (error) {
         alert('❌ ' + error.message);
@@ -876,6 +1005,7 @@ async function manejarLogin() {
 async function manejarLogout() {
     await backupAutomatico(true);
     await logout();
+    historialInterno = [];
     mostrarPantalla('login');
 }
 
@@ -901,6 +1031,11 @@ function actualizarReloj() {
 // ============ DASHBOARD ============
 async function renderizarDashboard() {
     const contenido = document.getElementById('main-content');
+    
+    // Reiniciar historial solo si venimos de login o de logout
+    if (historialInterno.length === 0) {
+        historialInterno = [{ vista: 'dashboard', params: {} }];
+    }
     
     try {
         const fichajes = await getAllFichajes();
@@ -1044,6 +1179,14 @@ async function renderizarDashboard() {
 
 // ============ MÓDULO CONTROL ============
 async function mostrarControl() {
+    // Empujar al historial SOLO si no venimos de un regreso
+    if (!ignorarPopstate) {
+        const ultimo = historialInterno[historialInterno.length - 1];
+        if (!ultimo || ultimo.vista !== 'control') {
+            empujarHistorial('control');
+        }
+    }
+    
     const contenido = document.getElementById('main-content');
     
     const pendientesCount = await contarObservacionesPendientes();
@@ -1191,6 +1334,11 @@ function renderizarResultadosBusqueda(personal, termino = '') {
 
 // ============ NUEVO PERSONAL DESDE CONTROL ============
 function nuevoPersonalDesdeControl() {
+    // Empujar historial
+    if (!ignorarPopstate) {
+        empujarHistorial('nuevoPersonalControl');
+    }
+    
     const contenido = document.getElementById('main-content');
     fotoControlCapturada = null;
     
@@ -1215,7 +1363,7 @@ function nuevoPersonalDesdeControl() {
                 
                 <div style="display: flex; gap: 10px; flex-wrap: wrap;">
                     <button class="btn-success" onclick="guardarNuevoPersonalControl()" style="flex: 1; min-width: 120px;">💾 Guardar</button>
-                    <button class="btn-cancel" onclick="mostrarControl()" style="flex: 1; min-width: 120px;">❌ Cancelar</button>
+                    <button class="btn-cancel" onclick="regresarEnHistorial()" style="flex: 1; min-width: 120px;">❌ Cancelar</button>
                 </div>
             </div>
         </div>
@@ -1270,6 +1418,11 @@ async function guardarNuevoPersonalControl() {
         
         fotoControlCapturada = null;
         mostrarNotificacion(`✅ Personal creado: ${nombre}`);
+        
+        // Volver a control (quitando nuevoPersonalControl del historial)
+        if (historialInterno.length > 1) {
+            historialInterno.pop();
+        }
         mostrarControl();
     } catch (error) {
         console.error('❌ Error:', error);
@@ -1442,6 +1595,13 @@ async function confirmarFichajeConMotivo(empleadoId, tipo) {
 
 // ============ MÓDULO DENTRO ============
 async function mostrarDentro() {
+    if (!ignorarPopstate) {
+        const ultimo = historialInterno[historialInterno.length - 1];
+        if (!ultimo || ultimo.vista !== 'dentro') {
+            empujarHistorial('dentro');
+        }
+    }
+    
     const contenido = document.getElementById('main-content');
     try {
         const fichajes = await getAllFichajes();
@@ -1486,6 +1646,13 @@ async function mostrarDentro() {
 
 // ============ MÓDULO REPORTES ============
 async function mostrarReportes() {
+    if (!ignorarPopstate) {
+        const ultimo = historialInterno[historialInterno.length - 1];
+        if (!ultimo || ultimo.vista !== 'reportes') {
+            empujarHistorial('reportes');
+        }
+    }
+    
     const contenido = document.getElementById('main-content');
     try {
         const personal = await getAllEmpleados();
@@ -1692,7 +1859,6 @@ async function aplicarFiltrosReportes() {
         
         resultado.innerHTML = tablaHTML;
         
-        // Guardar info de fechas para la impresión
         window._ultimoReporteFechas = { inicio: fechaInicioMostrar, fin: fechaFinMostrar };
         
     } catch (error) {
@@ -1753,6 +1919,13 @@ function imprimirReporte() {
 
 // ============ MÓDULO PERSONAL ============
 async function mostrarPersonal() {
+    if (!ignorarPopstate) {
+        const ultimo = historialInterno[historialInterno.length - 1];
+        if (!ultimo || ultimo.vista !== 'personal') {
+            empujarHistorial('personal');
+        }
+    }
+    
     const contenido = document.getElementById('main-content');
     try {
         const personal = await getAllEmpleados();
@@ -1802,6 +1975,11 @@ async function verPersonal(empleadoId) {
         const empleado = await getEmpleado(empleadoId);
         const contenido = document.getElementById('main-content');
         
+        // Empujar historial
+        if (!ignorarPopstate) {
+            empujarHistorial('verPersonal', { id: empleadoId });
+        }
+        
         contenido.innerHTML = `
             ${crearEncabezadoModulo('👤 Ver Personal', `Datos de ${empleado.nombre}`)}
             <div style="padding: 0 20px 20px;">
@@ -1814,7 +1992,7 @@ async function verPersonal(empleadoId) {
                     <p style="color: #5a6048;">RFID: ${empleado.rfid || 'Sin asignar'}</p>
                     <p style="color: #5a6048; font-size: 14px;">Registrado: ${empleado.fecha_creacion || 'N/A'}</p>
                 </div>
-                <button class="btn-cancel" onclick="mostrarPersonal()" style="width: 100%;">← Volver</button>
+                <button class="btn-cancel" onclick="regresarEnHistorial()" style="width: 100%;">← Volver</button>
             </div>
         `;
     } catch (error) {
@@ -1823,6 +2001,10 @@ async function verPersonal(empleadoId) {
 }
 
 function nuevoPersonal() {
+    if (!ignorarPopstate) {
+        empujarHistorial('nuevoPersonal');
+    }
+    
     const contenido = document.getElementById('main-content');
     fotoCapturada = null;
     
@@ -1847,7 +2029,7 @@ function nuevoPersonal() {
                 
                 <div style="display: flex; gap: 10px; flex-wrap: wrap;">
                     <button class="btn-success" onclick="guardarNuevoPersonal()" style="flex: 1; min-width: 120px;">💾 Guardar</button>
-                    <button class="btn-cancel" onclick="mostrarPersonal()" style="flex: 1; min-width: 120px;">❌ Cancelar</button>
+                    <button class="btn-cancel" onclick="regresarEnHistorial()" style="flex: 1; min-width: 120px;">❌ Cancelar</button>
                 </div>
             </div>
         </div>
@@ -1902,6 +2084,11 @@ async function guardarNuevoPersonal() {
         
         fotoCapturada = null;
         mostrarNotificacion(`✅ Personal creado: ${nombre}`);
+        
+        // Volver a personal
+        if (historialInterno.length > 1) {
+            historialInterno.pop();
+        }
         mostrarPersonal();
     } catch (error) {
         console.error('❌ Error:', error);
@@ -1918,6 +2105,10 @@ async function editarPersonal(empleadoId) {
         const empleado = await getEmpleado(empleadoId);
         const contenido = document.getElementById('main-content');
         fotoEditCapturada = null;
+        
+        if (!ignorarPopstate) {
+            empujarHistorial('editarPersonal', { id: empleadoId });
+        }
         
         contenido.innerHTML = `
             ${crearEncabezadoModulo('✏️ Editar Personal', `Editando: ${empleado.nombre}`)}
@@ -1948,7 +2139,7 @@ async function editarPersonal(empleadoId) {
                     <div style="display: flex; gap: 10px; flex-wrap: wrap;">
                         <button class="btn-success" onclick="guardarEdicionPersonal('${empleadoId}')" style="flex: 1; min-width: 100px;">💾 Guardar</button>
                         <button class="btn-danger" onclick="eliminarPersonal('${empleadoId}')" style="flex: 1; min-width: 100px;">🗑️ Eliminar</button>
-                        <button class="btn-cancel" onclick="mostrarPersonal()" style="flex: 1; min-width: 100px;">❌ Cancelar</button>
+                        <button class="btn-cancel" onclick="regresarEnHistorial()" style="flex: 1; min-width: 100px;">❌ Cancelar</button>
                     </div>
                 </div>
             </div>
@@ -2002,6 +2193,11 @@ async function guardarEdicionPersonal(empleadoId) {
         await backupAutomatico(true);
         
         mostrarNotificacion(`✅ Actualizado: ${nombre}`);
+        
+        // Volver a personal
+        if (historialInterno.length > 1) {
+            historialInterno.pop();
+        }
         mostrarPersonal();
     } catch (error) {
         console.error('❌ Error:', error);
@@ -2037,6 +2233,11 @@ async function eliminarPersonal(empleadoId) {
         await backupAutomatico(true);
         
         mostrarNotificacion(`✅ Eliminado: ${empleado.nombre}`);
+        
+        // Volver a personal
+        if (historialInterno.length > 1) {
+            historialInterno.pop();
+        }
         mostrarPersonal();
     } catch (error) {
         console.error('❌ Error:', error);
@@ -2045,6 +2246,13 @@ async function eliminarPersonal(empleadoId) {
 
 // ============ MÓDULO OBSERVADOS ============
 async function mostrarObservados() {
+    if (!ignorarPopstate) {
+        const ultimo = historialInterno[historialInterno.length - 1];
+        if (!ultimo || ultimo.vista !== 'observados') {
+            empujarHistorial('observados');
+        }
+    }
+    
     const contenido = document.getElementById('main-content');
     try {
         const observaciones = await getAllObservaciones();
@@ -2243,6 +2451,10 @@ async function verObservacion(observacionId) {
         const contenido = document.getElementById('main-content');
         const esAdmin = currentUser.rol === 'admin';
         
+        if (!ignorarPopstate) {
+            empujarHistorial('verObservacion', { id: observacionId });
+        }
+        
         contenido.innerHTML = `
             ${crearEncabezadoModulo('⚠️ Detalle Observación', `De ${observacion.nombre_empleado}`)}
             <div style="padding: 0 20px 20px;">
@@ -2272,7 +2484,7 @@ async function verObservacion(observacionId) {
                         </div>
                     ` : ''}
                     
-                    <button class="btn-cancel" onclick="mostrarObservados()" style="margin-top: 10px;">← Volver</button>
+                    <button class="btn-cancel" onclick="regresarEnHistorial()" style="margin-top: 10px;">← Volver</button>
                 </div>
             </div>
         `;
@@ -2316,6 +2528,11 @@ async function resolverObservacionConNota(observacionId) {
         await backupAutomatico(true);
         
         mostrarNotificacion('✅ Observación resuelta');
+        
+        // Volver a observados
+        if (historialInterno.length > 1) {
+            historialInterno.pop();
+        }
         mostrarObservados();
     } catch (error) {
         console.error('❌ Error:', error);
@@ -2327,6 +2544,13 @@ async function mostrarSeguridad() {
     if (currentUser.rol !== 'admin' && !tienePermiso('gestionar_operadores')) {
         alert('Sin permisos');
         return;
+    }
+    
+    if (!ignorarPopstate) {
+        const ultimo = historialInterno[historialInterno.length - 1];
+        if (!ultimo || ultimo.vista !== 'seguridad') {
+            empujarHistorial('seguridad');
+        }
     }
     
     const contenido = document.getElementById('main-content');
@@ -2600,6 +2824,10 @@ async function editarOperador(operadorId) {
         return;
     }
     
+    if (!ignorarPopstate) {
+        empujarHistorial('editarOperador', { id: operadorId });
+    }
+    
     const contenido = document.getElementById('main-content');
     contenido.innerHTML = `
         ${crearEncabezadoModulo('✏️ Editar Operador', `Editando: ${operador.nombre}`)}
@@ -2621,7 +2849,7 @@ async function editarOperador(operadorId) {
                 
                 <div style="display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap;">
                     <button class="btn-success" onclick="guardarEdicionOperador('${operadorId}')" style="flex: 1; min-width: 120px;">💾 Guardar</button>
-                    <button class="btn-cancel" onclick="mostrarSeguridad()" style="flex: 1; min-width: 120px;">❌ Cancelar</button>
+                    <button class="btn-cancel" onclick="regresarEnHistorial()" style="flex: 1; min-width: 120px;">❌ Cancelar</button>
                 </div>
             </div>
         </div>
@@ -2667,6 +2895,10 @@ async function guardarEdicionOperador(operadorId) {
         await backupAutomatico(true);
         
         mostrarNotificacion(`✅ Actualizado: ${nombre}`);
+        
+        if (historialInterno.length > 1) {
+            historialInterno.pop();
+        }
         mostrarSeguridad();
     } catch (error) {
         console.error('❌ Error:', error);
@@ -2746,6 +2978,10 @@ async function cambiarRol(operadorId) {
 }
 
 function nuevoOperador() {
+    if (!ignorarPopstate) {
+        empujarHistorial('nuevoOperador');
+    }
+    
     const contenido = document.getElementById('main-content');
     
     contenido.innerHTML = `
@@ -2768,7 +3004,7 @@ function nuevoOperador() {
                 
                 <div style="display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap;">
                     <button class="btn-success" onclick="guardarNuevoOperador()" style="flex: 1; min-width: 120px;">💾 Guardar</button>
-                    <button class="btn-cancel" onclick="mostrarSeguridad()" style="flex: 1; min-width: 120px;">❌ Cancelar</button>
+                    <button class="btn-cancel" onclick="regresarEnHistorial()" style="flex: 1; min-width: 120px;">❌ Cancelar</button>
                 </div>
             </div>
         </div>
@@ -2836,6 +3072,10 @@ async function guardarNuevoOperador() {
         await backupAutomatico(true);
         
         mostrarNotificacion(`✅ Operador creado: ${nombre}`);
+        
+        if (historialInterno.length > 1) {
+            historialInterno.pop();
+        }
         mostrarSeguridad();
     } catch (error) {
         console.error('❌ Error:', error);
@@ -3042,6 +3282,7 @@ async function reiniciarSistema() {
         alert('✅ Sistema reiniciado');
         currentUser = null;
         currentSession = null;
+        historialInterno = [];
         mostrarPantalla('login');
     } catch (error) {
         console.error('❌ Error:', error);
@@ -3289,7 +3530,6 @@ function imprimirConFirmas(contenidoHTML, titulo = 'Reporte', fechaInicio = '', 
                         margin: 15mm 12mm 20mm 12mm;
                     }
                     
-                    /* OCULTAR BOTONES EN LA IMPRESIÓN */
                     @media print {
                         .btn-print, .btn-close, button {
                             display: none !important;
@@ -3413,3 +3653,6 @@ window.imprimirObservadosConFiltros = imprimirObservadosConFiltros;
 window.procesarCambioDia = procesarCambioDia;
 window.renderizarResultadosBusqueda = renderizarResultadosBusqueda;
 window.imprimirConFirmas = imprimirConFirmas;
+window.regresarEnHistorial = regresarEnHistorial;
+window.empujarHistorial = empujarHistorial;
+window.ejecutarVista = ejecutarVista;
