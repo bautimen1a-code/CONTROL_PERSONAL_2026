@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#4a5c3a">
+    <meta name="apple-mobile-web-app-title" content="Control Personal">
+    <title>Control de Personal · MIL</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="manifest" href="manifest.json">
+    <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%234a5c3a'/><text x='50' y='70' text-anchor='middle' font-size='60' fill='%23e8e4d0'>⚔</text></svg>">
+    
+    <!-- ✅ LIBRERÍAS LOCALES - YA NO DEPENDEN DE INTERNET -->
+    <script src="libs/xlsx.full.min.js"></script>
+    <script src="libs/jszip.min.js"></script>
+    <script src="libs/FileSaver.min.js"></script>
+    
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('sw.js', { scope: './' })
+                .then(reg => {
+                    console.log('✅ Service Worker registrado');
+                    console.log('📋 Scope:', reg.scope);
+                    
+                    if (reg.active) {
+                        console.log('✅ Service Worker activo');
+                    }
+                    
+                    reg.addEventListener('updatefound', () => {
+                        const newSW = reg.installing;
+                        newSW.addEventListener('statechange', () => {
+                            if (newSW.state === 'activated') {
+                                console.log('✅ Nuevo SW activado - recargando...');
+                                window.location.reload();
+                            }
+                        });
+                    });
+                })
+                .catch(err => console.error('❌ SW error:', err));
+            
+            navigator.serviceWorker.ready.then(reg => {
+                console.log('✅ SW listo y funcionando offline');
+            });
+            
+            window.addEventListener('beforeinstallprompt', (e) => {
+                e.preventDefault();
+                window.deferredPrompt = e;
+                const banner = document.getElementById('install-banner');
+                if (banner) {
+                    banner.style.display = 'flex';
+                    banner.querySelector('.btn-install').addEventListener('click', () => {
+                        if (window.deferredPrompt) {
+                            window.deferredPrompt.prompt();
+                            window.deferredPrompt.userChoice.then((choice) => {
+                                if (choice.outcome === 'accepted') {
+                                    banner.style.display = 'none';
+                                }
+                                window.deferredPrompt = null;
+                            });
+                        }
+                    });
+                }
+            });
+            
+            window.addEventListener('appinstalled', () => {
+                document.getElementById('install-banner').style.display = 'none';
+                console.log('🎉 App instalada');
+            });
+        }
+    </script>
+</head>
+<body>
+    <div id="app">
+        <div id="install-banner" style="display: none; position: fixed; bottom: 0; left: 0; right: 0; background: #4a5c3a; color: #f0ecd8; padding: 10px 12px; z-index: 9999; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; border-top: 2px solid #2e3a25;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="font-size: 20px;">📱</span>
+                <div>
+                    <strong style="font-size: 14px;">Instalar App</strong>
+                    <small style="display: block; opacity: 0.85; font-size: 11px;">Usa la app sin internet</small>
+                </div>
+            </div>
+            <button class="btn-install" style="background: #e8e4d0; color: #4a5c3a; border: none; padding: 8px 18px; border-radius: 8px; font-weight: 700; cursor: pointer; min-height: 36px; font-size: 14px;">Instalar</button>
+        </div>
+
+        <div id="login-screen" class="screen active">
+            <div class="login-container">
+                <div class="login-logo">⚔</div>
+                <h1>Control de Personal</h1>
+                <p class="login-subtitle">Sistema de Asistencia · MIL</p>
+                
+                <div class="login-form">
+                    <label for="username">Usuario:</label>
+                    <input type="text" id="username" placeholder="Ingrese usuario" autocomplete="off" inputmode="text">
+                    
+                    <label for="password">Clave de acceso:</label>
+                    <input type="password" id="password" placeholder="Ingrese contraseña">
+                    
+                    <button id="btn-login" class="btn-primary">Acceder</button>
+                </div>
+                
+                <div class="login-datetime">
+                    <span id="login-date"></span>
+                    <span id="login-time"></span>
+                </div>
+            </div>
+        </div>
+
+        <div id="main-screen" class="screen">
+            <header class="app-header">
+                <div class="badge">
+                    ⚔️ <span>CTRL</span> · SECTOR 7
+                </div>
+                <div class="header-info">
+                    <span class="user-name" id="current-user-name"></span>
+                    <span class="user-role" id="current-user-role"></span>
+                </div>
+                <div class="header-right">
+                    <div class="header-datetime">
+                        <span id="main-date"></span>
+                        <span id="main-time"></span>
+                    </div>
+                    <button id="btn-logout" class="btn-logout-icon" title="Cerrar Sesión">🚪</button>
+                </div>
+            </header>
+            
+            <main id="main-content"></main>
+        </div>
+    </div>
+
+    <script src="db.js"></script>
+    <script src="auth.js"></script>
+    <script src="rfid.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

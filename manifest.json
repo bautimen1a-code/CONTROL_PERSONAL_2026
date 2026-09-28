@@ -1,0 +1,21 @@
+{
+    "name": "Control de Personal",
+    "short_name": "ControlPersonal",
+    "description": "Sistema de Control de Personal con RFID",
+    "start_url": "./",
+    "scope": "./",
+    "display": "standalone",
+    "background_color": "#e8e4d0",
+    "theme_color": "#4a5c3a",
+    "orientation": "portrait",
+    "categories": ["business", "productivity"],
+    "prefer_related_applications": false,
+    "icons": [
+        {
+            "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%234a5c3a'/><text x='50' y='70' text-anchor='middle' font-size='60' fill='%23e8e4d0'>⚔</text></svg>",
+            "sizes": "any",
+            "type": "image/svg+xml",
+            "purpose": "any maskable"
+        }
+    ]
+}
