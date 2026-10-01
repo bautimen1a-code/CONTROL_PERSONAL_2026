@@ -109,19 +109,42 @@ function tienePermiso(permiso) {
     return currentUser.permisos && currentUser.permisos[permiso] === true;
 }
 
+// ============ FECHA Y HORA (CORREGIDO - LOCAL, NO UTC) ============
+// ✅ FIX: Antes usaba toISOString() que convertía a UTC y adelantaba un día
+// después de las 20:00 en zonas UTC-4 (Bolivia, Chile, Argentina, etc.)
+// Ahora se usa getFullYear/getMonth/getDate que devuelven la fecha LOCAL.
+
+/**
+ * Devuelve la fecha actual en formato YYYY-MM-DD usando la zona horaria LOCAL.
+ * @returns {string}
+ */
 function obtenerFechaActual() {
     const ahora = new Date();
-    return ahora.toISOString().split('T')[0];
+    const año = ahora.getFullYear();
+    const mes = String(ahora.getMonth() + 1).padStart(2, '0');
+    const dia = String(ahora.getDate()).padStart(2, '0');
+    return `${año}-${mes}-${dia}`;
 }
 
+/**
+ * Devuelve la hora actual en formato HH:MM:SS usando la zona horaria LOCAL.
+ * @returns {string}
+ */
 function obtenerHoraActual() {
     const ahora = new Date();
-    return ahora.toTimeString().split(' ')[0];
+    const horas = String(ahora.getHours()).padStart(2, '0');
+    const minutos = String(ahora.getMinutes()).padStart(2, '0');
+    const segundos = String(ahora.getSeconds()).padStart(2, '0');
+    return `${horas}:${minutos}:${segundos}`;
 }
 
+/**
+ * Devuelve un objeto { fecha, hora } con los valores actuales LOCALES.
+ * @returns {{fecha: string, hora: string}}
+ */
 function obtenerFechaHoraActual() {
-    const ahora = new Date();
-    const fecha = ahora.toISOString().split('T')[0];
-    const hora = ahora.toTimeString().split(' ')[0];
-    return { fecha, hora };
+    return {
+        fecha: obtenerFechaActual(),
+        hora: obtenerHoraActual()
+    };
 }
