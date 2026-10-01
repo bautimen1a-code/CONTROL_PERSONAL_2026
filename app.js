@@ -15,23 +15,30 @@ let fotoCapturada = null;
 let fotoEditCapturada = null;
 let fotoControlCapturada = null;
 
-// ============ HISTORIAL INTERNO DE NAVEGACIÓN (SISTEMA ROBUSTO) ============
-// Cada elemento: { vista, params }
-// El historial del NAVEGADOR solo tiene UNA entrada base.
-// NO se hace pushState por cada navegación, solo se simula con popstate.
+// ============ HISTORIAL INTERNO DE NAVEGACIÓN ============
 let historialInterno = [];
-let navegandoAtras = false;   // Bandera: evita re-procesar popstate durante regreso programático
-let sesionActiva = false;     // Bandera: bloquea cierre de PWA mientras hay sesión
+let navegandoAtras = false;
+let sesionActiva = false;
 
-// ============ FECHAS Y HORAS ============
+// ============ FECHAS Y HORAS (CORREGIDO - LOCAL, NO UTC) ============
+// ✅ FIX: usar getFullYear/getMonth/getDate en vez de toISOString()
+// Esto evita que el sistema se adelante un día después de las 20:00
+// en zonas horarias con offset negativo (Bolivia UTC-4, etc.)
+
 function obtenerFechaActual() {
     const ahora = new Date();
-    return ahora.toISOString().split('T')[0];
+    const año = ahora.getFullYear();
+    const mes = String(ahora.getMonth() + 1).padStart(2, '0');
+    const dia = String(ahora.getDate()).padStart(2, '0');
+    return `${año}-${mes}-${dia}`;
 }
 
 function obtenerHoraActual() {
     const ahora = new Date();
-    return ahora.toTimeString().split(' ')[0];
+    const horas = String(ahora.getHours()).padStart(2, '0');
+    const minutos = String(ahora.getMinutes()).padStart(2, '0');
+    const segundos = String(ahora.getSeconds()).padStart(2, '0');
+    return `${horas}:${minutos}:${segundos}`;
 }
 
 function obtenerFechaHoraActual() {
@@ -41,15 +48,9 @@ function obtenerFechaHoraActual() {
     };
 }
 
-// ============ CONTROL DE HISTORIAL (NUEVA IMPLEMENTACIÓN) ============
-
-/**
- * Empuja una vista al historial interno.
- * NO toca el historial del navegador.
- */
+// ============ CONTROL DE HISTORIAL ============
 function empujarHistorial(vista, params = {}) {
     const ultimo = historialInterno[historialInterno.length - 1];
-    // Si la vista es la misma que la última, no duplicar
     if (ultimo && ultimo.vista === vista && JSON.stringify(ultimo.params) === JSON.stringify(params)) {
         return;
     }
@@ -57,39 +58,28 @@ function empujarHistorial(vista, params = {}) {
     console.log('📚 Historial interno:', historialInterno.map(h => h.vista).join(' → '));
 }
 
-/**
- * Regresa una vista atrás en el historial interno.
- * @returns {boolean} true si regresó, false si ya está en la raíz
- */
 function regresarEnHistorial() {
     if (historialInterno.length <= 1) {
-        return false; // Ya estamos en la raíz (dashboard)
+        return false;
     }
     
-    // Quitar la vista actual
     historialInterno.pop();
     
-    // Obtener la vista anterior
     const anterior = historialInterno[historialInterno.length - 1];
     if (!anterior) return false;
     
     console.log('⬅️ Regresando a:', anterior.vista);
     
-    // Renderizar la vista anterior
     navegandoAtras = true;
     try {
         ejecutarVista(anterior.vista, anterior.params);
     } finally {
-        // Liberar la bandera en el siguiente tick para no bloquear renders
         setTimeout(() => { navegandoAtras = false; }, 0);
     }
     
     return true;
 }
 
-/**
- * Ejecuta una vista por su nombre.
- */
 function ejecutarVista(vista, params = {}) {
     try {
         const funciones = {
@@ -125,28 +115,18 @@ function ejecutarVista(vista, params = {}) {
     }
 }
 
-/**
- * Inicializa el sistema de historial:
- *  1. Empuja UN estado base al historial del navegador (para "capturar" el primer atrás)
- *  2. Configura el listener popstate para navegar DENTRO del sistema
- *  3. Bloquea el cierre de la PWA con beforeunload
- */
 function initBackButtonHandler() {
-    // Empujar estado base UNA sola vez
     try {
         window.history.pushState({ base: true }, '', window.location.href);
     } catch (e) {
         console.warn('⚠️ pushState inicial falló:', e);
     }
     
-    // popstate: SIEMPRE navega dentro del sistema, NUNCA re-empuja
     window.addEventListener('popstate', async (e) => {
-        // Solo actuar si hay sesión activa
         if (!sesionActiva || !currentUser) {
             return;
         }
         
-        // Si ya estamos en el dashboard (raíz), preguntar si salir
         if (historialInterno.length <= 1) {
             const confirmar = confirm(
                 '⚠️ ¿Seguro que quieres salir del sistema?\n\n' +
@@ -154,7 +134,6 @@ function initBackButtonHandler() {
             );
             
             if (confirmar) {
-                // Salir del sistema
                 sesionActiva = false;
                 try {
                     await backupAutomatico(true);
@@ -165,7 +144,6 @@ function initBackButtonHandler() {
                 historialInterno = [];
                 mostrarPantalla('login');
             } else {
-                // Canceló: re-empujar estado base para "bloquear" el atrás
                 try {
                     window.history.pushState({ base: true }, '', window.location.href);
                 } catch (err) {
@@ -175,11 +153,8 @@ function initBackButtonHandler() {
             return;
         }
         
-        // Navegar hacia atrás dentro del sistema
         const regreso = regresarEnHistorial();
         
-        // CRÍTICO: Re-empujar estado base DESPUÉS del regreso para que el
-        // siguiente atrás funcione también. Esto es lo que se me había olvidado.
         if (regreso) {
             try {
                 window.history.pushState({ base: true }, '', window.location.href);
@@ -189,10 +164,8 @@ function initBackButtonHandler() {
         }
     });
     
-    // beforeunload: bloquea cierre accidental de la PWA mientras hay sesión
     window.addEventListener('beforeunload', (e) => {
         if (sesionActiva && currentUser) {
-            // En algunos navegadores esto muestra diálogo de confirmación
             e.preventDefault();
             e.returnValue = '';
             return '';
@@ -205,7 +178,6 @@ function initBackButtonHandler() {
 // ============ NAVEGACIÓN ============
 function volverAlInicio() {
     if (currentUser) {
-        // Limpiar historial y volver al dashboard
         historialInterno = [{ vista: 'dashboard', params: {} }];
         renderizarDashboard();
     } else {
@@ -319,9 +291,7 @@ function comprimirImagenOptimizada(file, maxWidth = 480, maxHeight = 480, calida
 function renderVirtualScroll(container, items, renderItem, itemHeight = 70) {
     if (!container) return;
     
-    // Evitar duplicar listeners
     if (container._vsInitialized) {
-        // Solo re-renderizar
         _dibujarVirtualScroll(container, items, renderItem, itemHeight);
         return;
     }
@@ -709,8 +679,8 @@ function abrirCamaraMovil(previewId, callback) {
             const preview = document.getElementById(previewId);
             if (preview) {
                 preview.innerHTML = `
-                    <img src="${foto}" style="max-width: 200px; max-height: 200px; border-radius: 8px; border: 2px solid #b8b39a;">
-                    <button onclick="document.getElementById('${previewId}').innerHTML = ''; ${previewId === 'preview-foto' ? 'fotoCapturada = null' : previewId === 'preview-foto-edit' ? 'fotoEditCapturada = null' : 'fotoControlCapturada = null'};" style="display: block; margin: 10px auto; background: #a83232; color: white; border: none; padding: 8px 15px; border-radius: 8px; cursor: pointer;">🗑️ Eliminar foto</button>
+                    <img src="${foto}" style="max-width: 220px; max-height: 220px; border-radius: 8px; border: 2px solid #b8b39a;">
+                    <button onclick="document.getElementById('${previewId}').innerHTML = ''; ${previewId === 'preview-foto' ? 'fotoCapturada = null' : previewId === 'preview-foto-edit' ? 'fotoEditCapturada = null' : 'fotoControlCapturada = null'};" style="display: block; margin: 10px auto; background: #a83232; color: white; border: none; padding: 10px 18px; border-radius: 8px; cursor: pointer; font-size: 16px;">🗑️ Eliminar foto</button>
                 `;
             }
         } catch (error) {
@@ -761,8 +731,8 @@ function capturarFotoPC() {
     const preview = document.getElementById('preview-foto');
     if (preview) {
         preview.innerHTML = `
-            <img src="${fotoCapturada}" style="max-width: 200px; max-height: 200px; border-radius: 8px; border: 2px solid #b8b39a;">
-            <button onclick="fotoCapturada = null; document.getElementById('preview-foto').innerHTML = '';" style="display: block; margin: 10px auto; background: #a83232; color: white; border: none; padding: 8px 15px; border-radius: 8px; cursor: pointer;">🗑️ Eliminar foto</button>
+            <img src="${fotoCapturada}" style="max-width: 220px; max-height: 220px; border-radius: 8px; border: 2px solid #b8b39a;">
+            <button onclick="fotoCapturada = null; document.getElementById('preview-foto').innerHTML = '';" style="display: block; margin: 10px auto; background: #a83232; color: white; border: none; padding: 10px 18px; border-radius: 8px; cursor: pointer; font-size: 16px;">🗑️ Eliminar foto</button>
         `;
     }
     cerrarCamaraPC();
@@ -826,8 +796,8 @@ function capturarFotoEditPC() {
     const preview = document.getElementById('preview-foto-edit');
     if (preview) {
         preview.innerHTML = `
-            <img src="${fotoEditCapturada}" style="max-width: 200px; max-height: 200px; border-radius: 8px; border: 2px solid #b8b39a;">
-            <button onclick="fotoEditCapturada = null; document.getElementById('preview-foto-edit').innerHTML = '';" style="display: block; margin: 10px auto; background: #a83232; color: white; border: none; padding: 8px 15px; border-radius: 8px; cursor: pointer;">🗑️ Eliminar foto</button>
+            <img src="${fotoEditCapturada}" style="max-width: 220px; max-height: 220px; border-radius: 8px; border: 2px solid #b8b39a;">
+            <button onclick="fotoEditCapturada = null; document.getElementById('preview-foto-edit').innerHTML = '';" style="display: block; margin: 10px auto; background: #a83232; color: white; border: none; padding: 10px 18px; border-radius: 8px; cursor: pointer; font-size: 16px;">🗑️ Eliminar foto</button>
         `;
     }
     cerrarCamaraEditPC();
@@ -891,8 +861,8 @@ function capturarFotoControl() {
     const preview = document.getElementById('preview-foto-control');
     if (preview) {
         preview.innerHTML = `
-            <img src="${fotoControlCapturada}" style="max-width: 200px; max-height: 200px; border-radius: 8px; border: 2px solid #b8b39a;">
-            <button onclick="fotoControlCapturada = null; document.getElementById('preview-foto-control').innerHTML = '';" style="display: block; margin: 10px auto; background: #a83232; color: white; border: none; padding: 8px 15px; border-radius: 8px; cursor: pointer;">🗑️ Eliminar foto</button>
+            <img src="${fotoControlCapturada}" style="max-width: 220px; max-height: 220px; border-radius: 8px; border: 2px solid #b8b39a;">
+            <button onclick="fotoControlCapturada = null; document.getElementById('preview-foto-control').innerHTML = '';" style="display: block; margin: 10px auto; background: #a83232; color: white; border: none; padding: 10px 18px; border-radius: 8px; cursor: pointer; font-size: 16px;">🗑️ Eliminar foto</button>
         `;
     }
     cerrarCamaraControl();
@@ -941,6 +911,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
         console.log('🚀 Iniciando aplicación...');
         console.log(ES_MOVIL ? '📱 Modo móvil' : '💻 Modo PC');
+        console.log('📅 Fecha local del dispositivo:', obtenerFechaActual(), obtenerHoraActual());
         
         await initDB();
         console.log('✅ DB lista');
@@ -986,7 +957,6 @@ function mostrarPantalla(pantalla) {
         actualizarInfoUsuario();
         sesionActiva = true;
         
-        // Inicializar historial interno con el dashboard como raíz
         historialInterno = [{ vista: 'dashboard', params: {} }];
         
         renderizarDashboard().catch(err => {
@@ -1053,7 +1023,6 @@ function actualizarReloj() {
 
 // ============ DASHBOARD ============
 async function renderizarDashboard() {
-    // Asegurar que el dashboard sea la raíz del historial
     if (historialInterno.length === 0) {
         historialInterno = [{ vista: 'dashboard', params: {} }];
     }
@@ -1080,7 +1049,7 @@ async function renderizarDashboard() {
                 <div class="module-card" onclick="mostrarControl()">
                     <div class="icon">⏱️</div>
                     <div class="label">Control</div>
-                    ${pendientesCount > 0 ? `<div style="font-size: 11px; color: #a83232; margin-top: 4px; background: #fde8e8; padding: 2px 8px; border-radius: 10px;">⚠️ ${pendientesCount} observados</div>` : ''}
+                    ${pendientesCount > 0 ? `<div style="font-size: 13px; color: #a83232; margin-top: 4px; background: #fde8e8; padding: 2px 8px; border-radius: 10px;">⚠️ ${pendientesCount} observados</div>` : ''}
                 </div>
             `;
         }
@@ -1117,7 +1086,7 @@ async function renderizarDashboard() {
                 <div class="module-card" onclick="mostrarObservados()">
                     <div class="icon">⚠️</div>
                     <div class="label">Observados</div>
-                    ${pendientesCount > 0 ? `<div style="font-size: 11px; color: #a83232; margin-top: 4px; background: #fde8e8; padding: 2px 8px; border-radius: 10px;">${pendientesCount} pendientes</div>` : ''}
+                    ${pendientesCount > 0 ? `<div style="font-size: 13px; color: #a83232; margin-top: 4px; background: #fde8e8; padding: 2px 8px; border-radius: 10px;">${pendientesCount} pendientes</div>` : ''}
                 </div>
             `;
         }
@@ -1202,7 +1171,6 @@ async function renderizarDashboard() {
 
 // ============ MÓDULO CONTROL ============
 async function mostrarControl() {
-    // Empujar al historial SOLO si NO estamos regresando
     if (!navegandoAtras) {
         empujarHistorial('control');
     }
@@ -1226,7 +1194,7 @@ async function mostrarControl() {
         
         <div style="padding: 0 20px;">
             <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap;">
-                <button class="btn-success" onclick="nuevoPersonalDesdeControl()" style="width: auto; padding: 14px 25px; font-size: 18px;">
+                <button class="btn-success" onclick="nuevoPersonalDesdeControl()" style="width: auto; padding: 16px 28px; font-size: 20px;">
                     ➕ Nuevo
                 </button>
             </div>
@@ -1330,7 +1298,6 @@ function renderizarResultadosBusqueda(personal, termino = '') {
         return;
     }
     
-    // Resetear el flag de virtual scroll si la lista cambió
     lista._vsInitialized = false;
     
     renderVirtualScroll(lista, personal, (item, index) => {
@@ -1351,7 +1318,7 @@ function renderizarResultadosBusqueda(personal, termino = '') {
             </div>
         `;
         return div;
-    }, 75);
+    }, 85);
 }
 
 // ============ NUEVO PERSONAL DESDE CONTROL ============
@@ -1367,24 +1334,24 @@ function nuevoPersonalDesdeControl() {
         ${crearEncabezadoModulo('➕ Nuevo Personal', 'Complete los datos')}
         <div style="padding: 0 20px 20px;">
             <div style="margin-top: 20px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 700;">Nombre:</label>
-                <input type="text" id="emp-nombre-control" style="width: 100%; padding: 12px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 16px; margin-bottom: 15px; background: #f5f2e4;">
+                <label style="display: block; margin-bottom: 8px; font-weight: 700; font-size: 17px;">Nombre:</label>
+                <input type="text" id="emp-nombre-control" style="width: 100%; padding: 16px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 18px; margin-bottom: 18px; background: #f5f2e4;">
                 
-                <label style="display: block; margin-bottom: 5px; font-weight: 700;">Cédula:</label>
-                <input type="text" id="emp-cedula-control" style="width: 100%; padding: 12px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 16px; margin-bottom: 15px; background: #f5f2e4;">
+                <label style="display: block; margin-bottom: 8px; font-weight: 700; font-size: 17px;">Cédula:</label>
+                <input type="text" id="emp-cedula-control" style="width: 100%; padding: 16px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 18px; margin-bottom: 18px; background: #f5f2e4;">
                 
-                <label style="display: block; margin-bottom: 5px; font-weight: 700;">RFID (opcional):</label>
-                <input type="text" id="emp-rfid-control" style="width: 100%; padding: 12px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 16px; margin-bottom: 15px; background: #f5f2e4;" placeholder="Pase la tarjeta RFID">
+                <label style="display: block; margin-bottom: 8px; font-weight: 700; font-size: 17px;">RFID (opcional):</label>
+                <input type="text" id="emp-rfid-control" style="width: 100%; padding: 16px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 18px; margin-bottom: 18px; background: #f5f2e4;" placeholder="Pase la tarjeta RFID">
                 
-                <label style="display: block; margin-bottom: 5px; font-weight: 700;">Foto:</label>
+                <label style="display: block; margin-bottom: 8px; font-weight: 700; font-size: 17px;">Foto:</label>
                 <div style="display: flex; gap: 10px; margin-bottom: 20px;">
-                    <button class="btn-primary" onclick="abrirCamaraControl()" style="width: auto; padding: 12px 20px;">📷 Capturar</button>
+                    <button class="btn-primary" onclick="abrirCamaraControl()" style="width: auto; padding: 14px 24px;">📷 Capturar</button>
                 </div>
                 <div id="preview-foto-control" style="text-align: center; margin-bottom: 20px;"></div>
                 
                 <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                    <button class="btn-success" onclick="guardarNuevoPersonalControl()" style="flex: 1; min-width: 120px;">💾 Guardar</button>
-                    <button class="btn-cancel" onclick="regresarEnHistorial()" style="flex: 1; min-width: 120px;">❌ Cancelar</button>
+                    <button class="btn-success" onclick="guardarNuevoPersonalControl()" style="flex: 1; min-width: 140px;">💾 Guardar</button>
+                    <button class="btn-cancel" onclick="regresarEnHistorial()" style="flex: 1; min-width: 140px;">❌ Cancelar</button>
                 </div>
             </div>
         </div>
@@ -1440,7 +1407,6 @@ async function guardarNuevoPersonalControl() {
         fotoControlCapturada = null;
         mostrarNotificacion(`✅ Personal creado: ${nombre}`);
         
-        // Volver a control (quitando nuevoPersonalControl del historial)
         if (historialInterno.length > 1) {
             historialInterno.pop();
         }
@@ -1509,14 +1475,14 @@ async function mostrarConfirmacionFichaje(empleadoId) {
         modal.innerHTML = `
             <div style="position: absolute; top: 30px; left: 0; right: 0; display: flex; justify-content: space-between; padding: 0 20px; z-index: 10000; flex-wrap: wrap; gap: 10px;">
                 <div style="display: flex; gap: 15px;">
-                    <button onclick="cerrarModalFichaje()" style="background: rgba(168,50,50,0.9); border: none; color: white; padding: 15px 25px; border-radius: 8px; font-size: 18px; cursor: pointer; font-weight: 600; min-height: 50px;">❌ Cancelar</button>
+                    <button onclick="cerrarModalFichaje()" style="background: rgba(168,50,50,0.9); border: none; color: white; padding: 16px 28px; border-radius: 8px; font-size: 20px; cursor: pointer; font-weight: 600; min-height: 56px;">❌ Cancelar</button>
                     ${estaDentro 
-                        ? `<button onclick="confirmarFichajeConMotivo('${empleadoId}', 'SALIDA')" style="background: rgba(168,50,50,0.9); border: none; color: white; padding: 15px 25px; border-radius: 8px; font-size: 18px; cursor: pointer; font-weight: 600; min-height: 50px;">🔴 SALIR</button>`
-                        : `<button onclick="confirmarFichajeConMotivo('${empleadoId}', 'ENTRADA')" style="background: rgba(77,124,58,0.9); border: none; color: white; padding: 15px 25px; border-radius: 8px; font-size: 18px; cursor: pointer; font-weight: 600; min-height: 50px;">🟢 ENTRAR</button>`
+                        ? `<button onclick="confirmarFichajeConMotivo('${empleadoId}', 'SALIDA')" style="background: rgba(168,50,50,0.9); border: none; color: white; padding: 16px 28px; border-radius: 8px; font-size: 20px; cursor: pointer; font-weight: 600; min-height: 56px;">🔴 SALIR</button>`
+                        : `<button onclick="confirmarFichajeConMotivo('${empleadoId}', 'ENTRADA')" style="background: rgba(77,124,58,0.9); border: none; color: white; padding: 16px 28px; border-radius: 8px; font-size: 20px; cursor: pointer; font-weight: 600; min-height: 56px;">🟢 ENTRAR</button>`
                     }
                 </div>
-                <div style="display: flex; gap: 10px; align-items: center; background: rgba(0,0,0,0.5); padding: 10px 20px; border-radius: 10px;">
-                    <span style="color: white; font-weight: 600;">${estaDentro ? '🟢 DENTRO' : '⚪ FUERA'}</span>
+                <div style="display: flex; gap: 10px; align-items: center; background: rgba(0,0,0,0.5); padding: 12px 22px; border-radius: 10px;">
+                    <span style="color: white; font-weight: 600; font-size: 18px;">${estaDentro ? '🟢 DENTRO' : '⚪ FUERA'}</span>
                 </div>
             </div>
             
@@ -1528,15 +1494,15 @@ async function mostrarConfirmacionFichaje(empleadoId) {
                     }
                 </div>
                 <div style="margin-top: 30px; text-align: center; color: white; width: 100%; max-width: 500px;">
-                    <h2 style="font-size: 32px; margin-bottom: 5px;">${empleado.nombre}</h2>
-                    <p style="font-size: 18px; opacity: 0.9;">CI: ${empleado.cedula}</p>
-                    <p style="font-size: 16px; opacity: 0.7; margin-top: 10px;">
+                    <h2 style="font-size: 36px; margin-bottom: 8px;">${empleado.nombre}</h2>
+                    <p style="font-size: 20px; opacity: 0.9;">CI: ${empleado.cedula}</p>
+                    <p style="font-size: 17px; opacity: 0.7; margin-top: 12px;">
                         ${ultimoFichaje ? `Último: ${ultimoFichaje.fecha} ${ultimoFichaje.hora} - ${ultimoFichaje.tipo}` : 'Sin fichajes'}
                     </p>
                     
-                    <div style="margin-top: 20px; text-align: left;">
-                        <label style="color: white; font-size: 14px; opacity: 0.9; display: block; margin-bottom: 5px;">📝 Motivo (opcional):</label>
-                        <input type="text" id="motivo-fichaje" placeholder="Ingrese motivo..." style="width: 100%; padding: 12px; border-radius: 8px; font-size: 16px; background: rgba(255,255,255,0.95); color: #2a2f22; outline: none; border: 2px solid #d4c88a;">
+                    <div style="margin-top: 22px; text-align: left;">
+                        <label style="color: white; font-size: 16px; opacity: 0.9; display: block; margin-bottom: 6px;">📝 Motivo (opcional):</label>
+                        <input type="text" id="motivo-fichaje" placeholder="Ingrese motivo..." style="width: 100%; padding: 14px; border-radius: 8px; font-size: 18px; background: rgba(255,255,255,0.95); color: #2a2f22; outline: none; border: 2px solid #d4c88a;">
                     </div>
                 </div>
             </div>
@@ -1684,17 +1650,17 @@ async function mostrarReportes() {
                         <option value="todos">📅 Todos</option>
                     </select>
                     <div id="fechas-personalizadas" style="display: none; flex: 2; gap: 10px; flex-wrap: wrap; width: 100%;">
-                        <input type="date" id="filtro-fecha-inicio" style="flex: 1; min-width: 120px;">
+                        <input type="date" id="filtro-fecha-inicio" style="flex: 1; min-width: 140px;">
                         <label style="display: flex; align-items: center;">a</label>
-                        <input type="date" id="filtro-fecha-fin" style="flex: 1; min-width: 120px;">
+                        <input type="date" id="filtro-fecha-fin" style="flex: 1; min-width: 140px;">
                     </div>
-                    <select id="filtro-empleado" style="flex: 1; min-width: 120px;">
+                    <select id="filtro-empleado" style="flex: 1; min-width: 140px;">
                         <option value="todos">Todo el personal</option>
                         ${personal.map(e => `<option value="${e.id}">${e.nombre}</option>`).join('')}
                     </select>
                     <input type="text" id="filtro-busqueda" placeholder="🔍 Buscar..." style="flex: 2; min-width: 200px;">
-                    <button class="btn-primary" onclick="aplicarFiltrosReportes()" style="width: auto; padding: 12px 20px;">🔄 Aplicar</button>
-                    <button class="btn-primary" onclick="imprimirReporte()" style="width: auto; padding: 12px 20px; background: #7a4a9a;">🖨️ Imprimir</button>
+                    <button class="btn-primary" onclick="aplicarFiltrosReportes()" style="width: auto; padding: 14px 24px;">🔄 Aplicar</button>
+                    <button class="btn-primary" onclick="imprimirReporte()" style="width: auto; padding: 14px 24px; background: #7a4a9a;">🖨️ Imprimir</button>
                 </div>
                 <div id="resultado-reportes" style="overflow-x: auto;"></div>
             </div>
@@ -1848,10 +1814,10 @@ async function aplicarFiltrosReportes() {
                             <td rowspan="${maxRows}">${item.fecha}</td>
                         ` : ''}
                         <td style="color: #3a7a3a;">${entrada.hora || '-'}</td>
-                        <td style="font-size: 12px; color: #5a6048;">${entrada.motivo || '-'}</td>
+                        <td style="font-size: 14px; color: #5a6048;">${entrada.motivo || '-'}</td>
                         <td>${entrada.operador || '-'}</td>
                         <td style="color: #a83232;">${salida.hora || '-'}</td>
-                        <td style="font-size: 12px; color: #5a6048;">${salida.motivo || '-'}</td>
+                        <td style="font-size: 14px; color: #5a6048;">${salida.motivo || '-'}</td>
                         <td>${salida.operador || '-'}</td>
                         <td>${estadoSalida}</td>
                     </tr>
@@ -1867,8 +1833,8 @@ async function aplicarFiltrosReportes() {
                 Mostrando ${Object.keys(agrupados).length} registros
             </div>
             <div style="padding: 0 20px 20px; display: flex; gap: 10px; flex-wrap: wrap;">
-                <button class="btn-primary" onclick="exportarReportesExcel()" style="width: auto; padding: 12px 20px;">📊 Excel</button>
-                <button class="btn-primary" onclick="exportarReportesCSV()" style="width: auto; padding: 12px 20px;">📄 CSV</button>
+                <button class="btn-primary" onclick="exportarReportesExcel()" style="width: auto; padding: 14px 24px;">📊 Excel</button>
+                <button class="btn-primary" onclick="exportarReportesCSV()" style="width: auto; padding: 14px 24px;">📄 CSV</button>
             </div>
         `;
         
@@ -1950,9 +1916,9 @@ async function mostrarPersonal() {
                     <input type="text" id="busqueda-personal" placeholder="Buscar..." autocomplete="off">
                 </div>
                 <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap;">
-                    <button class="btn-success" onclick="nuevoPersonal()" style="width: auto; padding: 14px 25px; font-size: 18px;">➕ Nuevo</button>
-                    ${tienePermiso('importar_csv') ? `<button class="btn-primary" onclick="importarCSV()" style="width: auto; padding: 12px 20px;">📥 Importar CSV</button>` : ''}
-                    ${esAdmin ? `<button class="btn-primary" onclick="exportarPersonalConFotos()" style="width: auto; padding: 12px 20px; background: #7a4a9a;">📊 Excel</button>` : ''}
+                    <button class="btn-success" onclick="nuevoPersonal()" style="width: auto; padding: 16px 28px; font-size: 20px;">➕ Nuevo</button>
+                    ${tienePermiso('importar_csv') ? `<button class="btn-primary" onclick="importarCSV()" style="width: auto; padding: 14px 24px;">📥 Importar CSV</button>` : ''}
+                    ${esAdmin ? `<button class="btn-primary" onclick="exportarPersonalConFotos()" style="width: auto; padding: 14px 24px; background: #7a4a9a;">📊 Excel</button>` : ''}
                 </div>
                 <div class="list-container" id="lista-personal">
                     ${personal.map(e => `
@@ -1999,9 +1965,9 @@ async function verPersonal(empleadoId) {
                         ${empleado.foto ? `<img src="${empleado.foto}">` : empleado.nombre.charAt(0)}
                     </div>
                     <h2 style="margin-top: 15px;">${empleado.nombre}</h2>
-                    <p style="color: #5a6048;">CI: ${empleado.cedula}</p>
-                    <p style="color: #5a6048;">RFID: ${empleado.rfid || 'Sin asignar'}</p>
-                    <p style="color: #5a6048; font-size: 14px;">Registrado: ${empleado.fecha_creacion || 'N/A'}</p>
+                    <p style="color: #5a6048; font-size: 17px;">CI: ${empleado.cedula}</p>
+                    <p style="color: #5a6048; font-size: 17px;">RFID: ${empleado.rfid || 'Sin asignar'}</p>
+                    <p style="color: #5a6048; font-size: 15px;">Registrado: ${empleado.fecha_creacion || 'N/A'}</p>
                 </div>
                 <button class="btn-cancel" onclick="regresarEnHistorial()" style="width: 100%;">← Volver</button>
             </div>
@@ -2023,24 +1989,24 @@ function nuevoPersonal() {
         ${crearEncabezadoModulo('➕ Nuevo Personal', 'Complete los datos')}
         <div style="padding: 0 20px 20px;">
             <div style="margin-top: 20px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 700;">Nombre:</label>
-                <input type="text" id="emp-nombre" style="width: 100%; padding: 12px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 16px; margin-bottom: 15px; background: #f5f2e4;">
+                <label style="display: block; margin-bottom: 8px; font-weight: 700; font-size: 17px;">Nombre:</label>
+                <input type="text" id="emp-nombre" style="width: 100%; padding: 16px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 18px; margin-bottom: 18px; background: #f5f2e4;">
                 
-                <label style="display: block; margin-bottom: 5px; font-weight: 700;">Cédula:</label>
-                <input type="text" id="emp-cedula" style="width: 100%; padding: 12px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 16px; margin-bottom: 15px; background: #f5f2e4;">
+                <label style="display: block; margin-bottom: 8px; font-weight: 700; font-size: 17px;">Cédula:</label>
+                <input type="text" id="emp-cedula" style="width: 100%; padding: 16px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 18px; margin-bottom: 18px; background: #f5f2e4;">
                 
-                <label style="display: block; margin-bottom: 5px; font-weight: 700;">RFID (opcional):</label>
-                <input type="text" id="emp-rfid" style="width: 100%; padding: 12px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 16px; margin-bottom: 15px; background: #f5f2e4;" placeholder="Pase la tarjeta RFID">
+                <label style="display: block; margin-bottom: 8px; font-weight: 700; font-size: 17px;">RFID (opcional):</label>
+                <input type="text" id="emp-rfid" style="width: 100%; padding: 16px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 18px; margin-bottom: 18px; background: #f5f2e4;" placeholder="Pase la tarjeta RFID">
                 
-                <label style="display: block; margin-bottom: 5px; font-weight: 700;">Foto:</label>
+                <label style="display: block; margin-bottom: 8px; font-weight: 700; font-size: 17px;">Foto:</label>
                 <div style="display: flex; gap: 10px; margin-bottom: 20px;">
-                    <button class="btn-primary" onclick="abrirCamara()" style="width: auto; padding: 12px 20px;">📷 Capturar</button>
+                    <button class="btn-primary" onclick="abrirCamara()" style="width: auto; padding: 14px 24px;">📷 Capturar</button>
                 </div>
                 <div id="preview-foto" style="text-align: center; margin-bottom: 20px;"></div>
                 
                 <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                    <button class="btn-success" onclick="guardarNuevoPersonal()" style="flex: 1; min-width: 120px;">💾 Guardar</button>
-                    <button class="btn-cancel" onclick="regresarEnHistorial()" style="flex: 1; min-width: 120px;">❌ Cancelar</button>
+                    <button class="btn-success" onclick="guardarNuevoPersonal()" style="flex: 1; min-width: 140px;">💾 Guardar</button>
+                    <button class="btn-cancel" onclick="regresarEnHistorial()" style="flex: 1; min-width: 140px;">❌ Cancelar</button>
                 </div>
             </div>
         </div>
@@ -2129,27 +2095,27 @@ async function editarPersonal(empleadoId) {
                     </div>
                 </div>
                 <div style="margin-top: 20px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 700;">Nombre:</label>
-                    <input type="text" id="edit-nombre" value="${empleado.nombre}" style="width: 100%; padding: 12px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 16px; margin-bottom: 15px; background: #f5f2e4;">
+                    <label style="display: block; margin-bottom: 8px; font-weight: 700; font-size: 17px;">Nombre:</label>
+                    <input type="text" id="edit-nombre" value="${empleado.nombre}" style="width: 100%; padding: 16px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 18px; margin-bottom: 18px; background: #f5f2e4;">
                     
-                    <label style="display: block; margin-bottom: 5px; font-weight: 700;">Cédula:</label>
-                    <input type="text" id="edit-cedula" value="${empleado.cedula}" style="width: 100%; padding: 12px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 16px; margin-bottom: 15px; background: #f5f2e4;">
+                    <label style="display: block; margin-bottom: 8px; font-weight: 700; font-size: 17px;">Cédula:</label>
+                    <input type="text" id="edit-cedula" value="${empleado.cedula}" style="width: 100%; padding: 16px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 18px; margin-bottom: 18px; background: #f5f2e4;">
                     
-                    <label style="display: block; margin-bottom: 5px; font-weight: 700;">RFID:</label>
-                    <input type="text" id="edit-rfid" value="${empleado.rfid || ''}" style="width: 100%; padding: 12px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 16px; margin-bottom: 15px; background: #f5f2e4;" placeholder="Pase RFID">
+                    <label style="display: block; margin-bottom: 8px; font-weight: 700; font-size: 17px;">RFID:</label>
+                    <input type="text" id="edit-rfid" value="${empleado.rfid || ''}" style="width: 100%; padding: 16px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 18px; margin-bottom: 18px; background: #f5f2e4;" placeholder="Pase RFID">
                     
-                    <label style="display: block; margin-bottom: 5px; font-weight: 700;">Foto:</label>
+                    <label style="display: block; margin-bottom: 8px; font-weight: 700; font-size: 17px;">Foto:</label>
                     <div style="display: flex; gap: 10px; margin-bottom: 20px;">
-                        <button class="btn-primary" onclick="abrirCamaraEdit()" style="width: auto; padding: 12px 20px;">📷 Capturar</button>
+                        <button class="btn-primary" onclick="abrirCamaraEdit()" style="width: auto; padding: 14px 24px;">📷 Capturar</button>
                     </div>
                     <div id="preview-foto-edit" style="text-align: center; margin-bottom: 20px;">
-                        ${empleado.foto ? `<img src="${empleado.foto}" style="max-width: 200px; max-height: 200px; border-radius: 8px; border: 2px solid #b8b39a;">` : ''}
+                        ${empleado.foto ? `<img src="${empleado.foto}" style="max-width: 220px; max-height: 220px; border-radius: 8px; border: 2px solid #b8b39a;">` : ''}
                     </div>
                     
                     <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                        <button class="btn-success" onclick="guardarEdicionPersonal('${empleadoId}')" style="flex: 1; min-width: 100px;">💾 Guardar</button>
-                        <button class="btn-danger" onclick="eliminarPersonal('${empleadoId}')" style="flex: 1; min-width: 100px;">🗑️ Eliminar</button>
-                        <button class="btn-cancel" onclick="regresarEnHistorial()" style="flex: 1; min-width: 100px;">❌ Cancelar</button>
+                        <button class="btn-success" onclick="guardarEdicionPersonal('${empleadoId}')" style="flex: 1; min-width: 110px;">💾 Guardar</button>
+                        <button class="btn-danger" onclick="eliminarPersonal('${empleadoId}')" style="flex: 1; min-width: 110px;">🗑️ Eliminar</button>
+                        <button class="btn-cancel" onclick="regresarEnHistorial()" style="flex: 1; min-width: 110px;">❌ Cancelar</button>
                     </div>
                 </div>
             </div>
@@ -2270,22 +2236,22 @@ async function mostrarObservados() {
             ${crearEncabezadoModulo('⚠️ Personal Observado', `${pendientes.length} pendientes, ${resueltos.length} resueltos`)}
             <div style="padding: 0 20px;">
                 <div class="filters" style="margin: 0 0 15px 0;">
-                    <select id="filtro-observados-estado" style="flex: 1; min-width: 100px;">
+                    <select id="filtro-observados-estado" style="flex: 1; min-width: 120px;">
                         <option value="todos">📋 Todos</option>
                         <option value="PENDIENTE">⚠️ Pendientes</option>
                         <option value="RESUELTA">✅ Resueltos</option>
                     </select>
-                    <input type="date" id="filtro-observados-fecha-inicio" style="flex: 1; min-width: 120px;">
+                    <input type="date" id="filtro-observados-fecha-inicio" style="flex: 1; min-width: 140px;">
                     <label style="display: flex; align-items: center;">a</label>
-                    <input type="date" id="filtro-observados-fecha-fin" style="flex: 1; min-width: 120px;">
-                    <select id="filtro-observados-operador" style="flex: 1; min-width: 120px;">
+                    <input type="date" id="filtro-observados-fecha-fin" style="flex: 1; min-width: 140px;">
+                    <select id="filtro-observados-operador" style="flex: 1; min-width: 140px;">
                         <option value="todos">👤 Todos</option>
                         ${operadores.map(o => `<option value="${o.nombre}">${o.nombre}</option>`).join('')}
                     </select>
-                    <input type="text" id="filtro-observados-busqueda" placeholder="🔍 Buscar..." style="flex: 2; min-width: 150px;">
-                    <button class="btn-primary" onclick="aplicarFiltrosObservados()" style="width: auto; padding: 12px 20px;">🔄 Aplicar</button>
-                    <button class="btn-cancel" onclick="limpiarFiltrosObservados()" style="width: auto; padding: 12px 20px;">🗑️ Limpiar</button>
-                    <button class="btn-primary" onclick="imprimirObservadosConFiltros()" style="width: auto; padding: 12px 20px; background: #7a4a9a;">🖨️ Imprimir</button>
+                    <input type="text" id="filtro-observados-busqueda" placeholder="🔍 Buscar..." style="flex: 2; min-width: 180px;">
+                    <button class="btn-primary" onclick="aplicarFiltrosObservados()" style="width: auto; padding: 14px 24px;">🔄 Aplicar</button>
+                    <button class="btn-cancel" onclick="limpiarFiltrosObservados()" style="width: auto; padding: 14px 24px;">🗑️ Limpiar</button>
+                    <button class="btn-primary" onclick="imprimirObservadosConFiltros()" style="width: auto; padding: 14px 24px; background: #7a4a9a;">🖨️ Imprimir</button>
                 </div>
                 
                 <div class="list-container" id="lista-observados">
@@ -2297,7 +2263,12 @@ async function mostrarObservados() {
         const hoy = obtenerFechaActual();
         const hace7Dias = new Date();
         hace7Dias.setDate(hace7Dias.getDate() - 7);
-        const fechaInicio = hace7Dias.toISOString().split('T')[0];
+        const fechaInicio = (() => {
+            const a = hace7Dias.getFullYear();
+            const m = String(hace7Dias.getMonth() + 1).padStart(2, '0');
+            const d = String(hace7Dias.getDate()).padStart(2, '0');
+            return `${a}-${m}-${d}`;
+        })();
         
         document.getElementById('filtro-observados-fecha-inicio').value = fechaInicio;
         document.getElementById('filtro-observados-fecha-fin').value = hoy;
@@ -2329,7 +2300,7 @@ async function renderizarListaObservados(observaciones) {
         return;
     }
     
-    lista._vsInitialized = false; // Reset para nueva data
+    lista._vsInitialized = false;
     
     renderVirtualScroll(lista, ordenadas, (item) => {
         const div = document.createElement('div');
@@ -2355,7 +2326,7 @@ async function renderizarListaObservados(observaciones) {
             </div>
         `;
         return div;
-    }, 75);
+    }, 90);
 }
 
 async function aplicarFiltrosObservados() {
@@ -2479,15 +2450,15 @@ async function verObservacion(observacionId) {
                     
                     ${observacion.estado === 'PENDIENTE' && esAdmin ? `
                         <div style="margin-top: 15px;">
-                            <label style="display: block; margin-bottom: 5px; font-weight: 700;">📝 Nota (obligatoria):</label>
-                            <textarea id="nota-justificacion" rows="3" style="width: 100%; padding: 12px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 16px; margin-bottom: 15px; background: #f5f2e4;" placeholder="Motivo..."></textarea>
+                            <label style="display: block; margin-bottom: 8px; font-weight: 700; font-size: 17px;">📝 Nota (obligatoria):</label>
+                            <textarea id="nota-justificacion" rows="3" style="width: 100%; padding: 14px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 17px; margin-bottom: 15px; background: #f5f2e4;" placeholder="Motivo..."></textarea>
                             <button class="btn-success" onclick="resolverObservacionConNota(${observacion.id})" style="width: 100%;">✔️ RESUELTA</button>
                         </div>
                     ` : ''}
                     
                     ${observacion.estado === 'RESUELTA' ? `
                         <div style="margin-top: 15px; padding: 15px; background: #d8e8d0; border-radius: 8px;">
-                            <span style="color: #3a5e2c;">✅ Ya resuelta</span>
+                            <span style="color: #3a5e2c; font-size: 17px;">✅ Ya resuelta</span>
                         </div>
                     ` : ''}
                     
@@ -2565,15 +2536,15 @@ async function mostrarSeguridad() {
             ${crearEncabezadoModulo('🔐 Seguridad', 'Operadores y auditoría')}
             <div style="padding: 0 20px;">
                 <div style="margin-bottom: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
-                    <button class="btn-primary" onclick="nuevoOperador()" style="width: auto; padding: 12px 20px;">➕ Nuevo Operador</button>
-                    <button class="btn-danger" onclick="solicitarReinicio()" style="width: auto; padding: 12px 20px;">🔄 Reiniciar</button>
-                    <button class="btn-primary" onclick="exportarAuditoriaExcel()" style="width: auto; padding: 12px 20px; background: #7a4a9a;">📊 Excel</button>
-                    <button class="btn-primary" onclick="exportarAuditoriaCSV()" style="width: auto; padding: 12px 20px; background: #7a4a9a;">📄 CSV</button>
-                    <button class="btn-primary" onclick="imprimirAuditoriaConFiltros()" style="width: auto; padding: 12px 20px; background: #7a4a9a;">🖨️ Imprimir</button>
-                    ${currentUser.rol === 'admin' ? `<button class="btn-primary" onclick="exportarPersonalConFotos()" style="width: auto; padding: 12px 20px; background: #7a4a9a;">📊 Personal Excel</button>` : ''}
+                    <button class="btn-primary" onclick="nuevoOperador()" style="width: auto; padding: 14px 24px;">➕ Nuevo Operador</button>
+                    <button class="btn-danger" onclick="solicitarReinicio()" style="width: auto; padding: 14px 24px;">🔄 Reiniciar</button>
+                    <button class="btn-primary" onclick="exportarAuditoriaExcel()" style="width: auto; padding: 14px 24px; background: #7a4a9a;">📊 Excel</button>
+                    <button class="btn-primary" onclick="exportarAuditoriaCSV()" style="width: auto; padding: 14px 24px; background: #7a4a9a;">📄 CSV</button>
+                    <button class="btn-primary" onclick="imprimirAuditoriaConFiltros()" style="width: auto; padding: 14px 24px; background: #7a4a9a;">🖨️ Imprimir</button>
+                    ${currentUser.rol === 'admin' ? `<button class="btn-primary" onclick="exportarPersonalConFotos()" style="width: auto; padding: 14px 24px; background: #7a4a9a;">📊 Personal Excel</button>` : ''}
                 </div>
                 
-                <h3 style="margin-bottom: 10px; color: #3a4a2e;">👥 Operadores</h3>
+                <h3 style="margin-bottom: 10px; color: #3a4a2e; font-size: 20px;">👥 Operadores</h3>
                 <div style="overflow-x: auto; margin-bottom: 20px;">
                     <table>
                         <thead>
@@ -2605,22 +2576,22 @@ async function mostrarSeguridad() {
                     </table>
                 </div>
                 
-                <h3 style="margin-bottom: 10px; color: #3a4a2e;">💾 Respaldo</h3>
+                <h3 style="margin-bottom: 10px; color: #3a4a2e; font-size: 20px;">💾 Respaldo</h3>
                 <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px;">
-                    <button class="btn-primary" onclick="exportarRespaldo()" style="width: auto; padding: 12px 20px;">📥 Exportar Respaldo</button>
-                    <button class="btn-primary" onclick="importarRespaldo()" style="width: auto; padding: 12px 20px;">📤 Importar Respaldo</button>
-                    <button class="btn-primary" onclick="backupAutomatico(true)" style="width: auto; padding: 12px 20px;">💾 Backup Ahora</button>
+                    <button class="btn-primary" onclick="exportarRespaldo()" style="width: auto; padding: 14px 24px;">📥 Exportar Respaldo</button>
+                    <button class="btn-primary" onclick="importarRespaldo()" style="width: auto; padding: 14px 24px;">📤 Importar Respaldo</button>
+                    <button class="btn-primary" onclick="backupAutomatico(true)" style="width: auto; padding: 14px 24px;">💾 Backup Ahora</button>
                 </div>
                 
-                <h3 style="margin-bottom: 10px; color: #3a4a2e;">📋 Auditoría</h3>
+                <h3 style="margin-bottom: 10px; color: #3a4a2e; font-size: 20px;">📋 Auditoría</h3>
                 <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap;">
-                    <input type="date" id="filtro-auditoria-fecha-inicio" style="flex: 1; min-width: 120px; padding: 10px; border: 2px solid #b8b39a; border-radius: 8px; background: #f5f2e4;">
-                    <input type="date" id="filtro-auditoria-fecha-fin" style="flex: 1; min-width: 120px; padding: 10px; border: 2px solid #b8b39a; border-radius: 8px; background: #f5f2e4;">
-                    <select id="filtro-auditoria-operador" style="flex: 1; min-width: 120px; padding: 10px; border: 2px solid #b8b39a; border-radius: 8px; background: #f5f2e4;">
+                    <input type="date" id="filtro-auditoria-fecha-inicio" style="flex: 1; min-width: 140px; padding: 12px; border: 2px solid #b8b39a; border-radius: 8px; background: #f5f2e4; font-size: 16px;">
+                    <input type="date" id="filtro-auditoria-fecha-fin" style="flex: 1; min-width: 140px; padding: 12px; border: 2px solid #b8b39a; border-radius: 8px; background: #f5f2e4; font-size: 16px;">
+                    <select id="filtro-auditoria-operador" style="flex: 1; min-width: 140px; padding: 12px; border: 2px solid #b8b39a; border-radius: 8px; background: #f5f2e4; font-size: 16px;">
                         <option value="todos">Todos</option>
                         ${operadores.map(o => `<option value="${o.nombre}">${o.nombre}</option>`).join('')}
                     </select>
-                    <select id="filtro-auditoria-accion" style="flex: 1; min-width: 120px; padding: 10px; border: 2px solid #b8b39a; border-radius: 8px; background: #f5f2e4;">
+                    <select id="filtro-auditoria-accion" style="flex: 1; min-width: 140px; padding: 12px; border: 2px solid #b8b39a; border-radius: 8px; background: #f5f2e4; font-size: 16px;">
                         <option value="todos">Todas</option>
                         <option value="Inicio de sesión">Inicio sesión</option>
                         <option value="Cierre de sesión">Cierre sesión</option>
@@ -2636,9 +2607,9 @@ async function mostrarSeguridad() {
                         <option value="Importar respaldo">Importar respaldo</option>
                         <option value="Resolver observación">Resolver obs</option>
                     </select>
-                    <input type="text" id="filtro-auditoria-busqueda" placeholder="🔍 Buscar..." style="flex: 2; min-width: 150px; padding: 10px; border: 2px solid #b8b39a; border-radius: 8px; background: #f5f2e4;">
-                    <button class="btn-primary" onclick="aplicarFiltrosAuditoria()" style="width: auto; padding: 12px 20px;">🔄 Aplicar</button>
-                    <button class="btn-cancel" onclick="limpiarFiltrosAuditoria()" style="width: auto; padding: 12px 20px;">🗑️ Limpiar</button>
+                    <input type="text" id="filtro-auditoria-busqueda" placeholder="🔍 Buscar..." style="flex: 2; min-width: 180px; padding: 12px; border: 2px solid #b8b39a; border-radius: 8px; background: #f5f2e4; font-size: 16px;">
+                    <button class="btn-primary" onclick="aplicarFiltrosAuditoria()" style="width: auto; padding: 14px 24px;">🔄 Aplicar</button>
+                    <button class="btn-cancel" onclick="limpiarFiltrosAuditoria()" style="width: auto; padding: 14px 24px;">🗑️ Limpiar</button>
                 </div>
                 <div class="list-container" id="lista-auditoria">
                     ${auditoria.slice(-50).reverse().map(a => `
@@ -2695,7 +2666,7 @@ async function aplicarFiltrosAuditoria() {
     
     const contador = document.createElement('div');
     contador.className = 'filtro-contador';
-    contador.style.cssText = 'padding: 10px 15px; font-size: 14px; color: #5a6048; background: #ebe7d3; border-bottom: 1px solid #b8b39a;';
+    contador.style.cssText = 'padding: 10px 15px; font-size: 15px; color: #5a6048; background: #ebe7d3; border-bottom: 1px solid #b8b39a;';
     contador.textContent = `📊 Mostrando ${visibles} de ${items.length} registros`;
     lista.prepend(contador);
 }
@@ -2836,23 +2807,23 @@ async function editarOperador(operadorId) {
         ${crearEncabezadoModulo('✏️ Editar Operador', `Editando: ${operador.nombre}`)}
         <div style="padding: 0 20px 20px;">
             <div style="margin-top: 20px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 700;">Nombre:</label>
-                <input type="text" id="edit-op-nombre" value="${operador.nombre}" style="width: 100%; padding: 12px; margin-bottom: 15px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 16px; background: #f5f2e4;">
+                <label style="display: block; margin-bottom: 8px; font-weight: 700; font-size: 17px;">Nombre:</label>
+                <input type="text" id="edit-op-nombre" value="${operador.nombre}" style="width: 100%; padding: 16px; margin-bottom: 18px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 18px; background: #f5f2e4;">
                 
-                <label style="display: block; margin-bottom: 5px; font-weight: 700;">Usuario:</label>
-                <input type="text" id="edit-op-username" value="${operador.username}" style="width: 100%; padding: 12px; margin-bottom: 15px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 16px; background: #f5f2e4;">
+                <label style="display: block; margin-bottom: 8px; font-weight: 700; font-size: 17px;">Usuario:</label>
+                <input type="text" id="edit-op-username" value="${operador.username}" style="width: 100%; padding: 16px; margin-bottom: 18px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 18px; background: #f5f2e4;">
                 
-                <label style="display: block; margin-bottom: 5px; font-weight: 700;">Nueva Contraseña (blanco = mantener):</label>
-                <input type="password" id="edit-op-password" style="width: 100%; padding: 12px; margin-bottom: 15px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 16px; background: #f5f2e4;">
+                <label style="display: block; margin-bottom: 8px; font-weight: 700; font-size: 17px;">Nueva Contraseña (blanco = mantener):</label>
+                <input type="password" id="edit-op-password" style="width: 100%; padding: 16px; margin-bottom: 18px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 18px; background: #f5f2e4;">
                 
-                <label style="display: flex; align-items: center; gap: 10px; margin-bottom: 15px;">
-                    <input type="checkbox" id="edit-op-activo" ${operador.activo ? 'checked' : ''}>
+                <label style="display: flex; align-items: center; gap: 10px; margin-bottom: 15px; font-size: 17px;">
+                    <input type="checkbox" id="edit-op-activo" ${operador.activo ? 'checked' : ''} style="width: 22px; height: 22px;">
                     Activo
                 </label>
                 
                 <div style="display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap;">
-                    <button class="btn-success" onclick="guardarEdicionOperador('${operadorId}')" style="flex: 1; min-width: 120px;">💾 Guardar</button>
-                    <button class="btn-cancel" onclick="regresarEnHistorial()" style="flex: 1; min-width: 120px;">❌ Cancelar</button>
+                    <button class="btn-success" onclick="guardarEdicionOperador('${operadorId}')" style="flex: 1; min-width: 140px;">💾 Guardar</button>
+                    <button class="btn-cancel" onclick="regresarEnHistorial()" style="flex: 1; min-width: 140px;">❌ Cancelar</button>
                 </div>
             </div>
         </div>
@@ -2991,23 +2962,23 @@ function nuevoOperador() {
         ${crearEncabezadoModulo('➕ Nuevo Operador', 'Configure el operador')}
         <div style="padding: 0 20px 20px;">
             <div style="margin-top: 20px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 700;">Nombre:</label>
-                <input type="text" id="op-nombre" style="width: 100%; padding: 12px; margin-bottom: 15px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 16px; background: #f5f2e4;">
+                <label style="display: block; margin-bottom: 8px; font-weight: 700; font-size: 17px;">Nombre:</label>
+                <input type="text" id="op-nombre" style="width: 100%; padding: 16px; margin-bottom: 18px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 18px; background: #f5f2e4;">
                 
-                <label style="display: block; margin-bottom: 5px; font-weight: 700;">Usuario:</label>
-                <input type="text" id="op-username" style="width: 100%; padding: 12px; margin-bottom: 15px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 16px; background: #f5f2e4;">
+                <label style="display: block; margin-bottom: 8px; font-weight: 700; font-size: 17px;">Usuario:</label>
+                <input type="text" id="op-username" style="width: 100%; padding: 16px; margin-bottom: 18px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 18px; background: #f5f2e4;">
                 
-                <label style="display: block; margin-bottom: 5px; font-weight: 700;">Contraseña:</label>
-                <input type="password" id="op-password" style="width: 100%; padding: 12px; margin-bottom: 15px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 16px; background: #f5f2e4;">
+                <label style="display: block; margin-bottom: 8px; font-weight: 700; font-size: 17px;">Contraseña:</label>
+                <input type="password" id="op-password" style="width: 100%; padding: 16px; margin-bottom: 18px; border: 2px solid #b8b39a; border-radius: 8px; font-size: 18px; background: #f5f2e4;">
                 
-                <h3 style="margin: 20px 0 10px; color: #3a4a2e;">Permisos:</h3>
+                <h3 style="margin: 20px 0 10px; color: #3a4a2e; font-size: 20px;">Permisos:</h3>
                 <div id="permisos-container" style="background: #ebe7d3; padding: 15px; border-radius: 8px;">
                     ${renderizarPermisosCheckbox()}
                 </div>
                 
                 <div style="display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap;">
-                    <button class="btn-success" onclick="guardarNuevoOperador()" style="flex: 1; min-width: 120px;">💾 Guardar</button>
-                    <button class="btn-cancel" onclick="regresarEnHistorial()" style="flex: 1; min-width: 120px;">❌ Cancelar</button>
+                    <button class="btn-success" onclick="guardarNuevoOperador()" style="flex: 1; min-width: 140px;">💾 Guardar</button>
+                    <button class="btn-cancel" onclick="regresarEnHistorial()" style="flex: 1; min-width: 140px;">❌ Cancelar</button>
                 </div>
             </div>
         </div>
@@ -3029,8 +3000,8 @@ function renderizarPermisosCheckbox() {
     ];
     
     return permisos.map(p => `
-        <label style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
-            <input type="checkbox" id="perm-${p.clave}" checked>
+        <label style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 16px;">
+            <input type="checkbox" id="perm-${p.clave}" checked style="width: 22px; height: 22px;">
             ${p.label}
         </label>
     `).join('');
@@ -3216,12 +3187,12 @@ function solicitarReinicio() {
     modal.className = 'modal-confirm';
     modal.innerHTML = `
         <div class="modal-confirm-content">
-            <h3 style="margin-bottom: 15px; color: #a83232;">⚠️ Reiniciar Sistema</h3>
-            <p style="margin-bottom: 15px; color: #5a6048;">Ingrese contraseña de administrador</p>
+            <h3 style="margin-bottom: 15px; color: #a83232; font-size: 22px;">⚠️ Reiniciar Sistema</h3>
+            <p style="margin-bottom: 15px; color: #5a6048; font-size: 17px;">Ingrese contraseña de administrador</p>
             <input type="password" id="password-reinicio" placeholder="Contraseña admin" style="margin-bottom: 15px;">
             <div style="display: flex; gap: 10px;">
-                <button onclick="confirmarReinicio()" style="flex: 1; background: #a83232; color: white; border: none; padding: 12px; border-radius: 8px; font-size: 16px; cursor: pointer; font-weight: 700;">🔄 Reiniciar</button>
-                <button onclick="this.closest('.modal-confirm').remove()" style="flex: 1; background: #ebe7d3; color: #2a2f22; border: none; padding: 12px; border-radius: 8px; font-size: 16px; cursor: pointer; font-weight: 700;">❌ Cancelar</button>
+                <button onclick="confirmarReinicio()" style="flex: 1; background: #a83232; color: white; border: none; padding: 14px; border-radius: 8px; font-size: 17px; cursor: pointer; font-weight: 700;">🔄 Reiniciar</button>
+                <button onclick="this.closest('.modal-confirm').remove()" style="flex: 1; background: #ebe7d3; color: #2a2f22; border: none; padding: 14px; border-radius: 8px; font-size: 17px; cursor: pointer; font-weight: 700;">❌ Cancelar</button>
             </div>
         </div>
     `;
@@ -3317,15 +3288,27 @@ async function calcularEmpleadosDentroLista(fichajes) {
     }));
 }
 
+// ✅ FIX: obtenerSemana ahora usa fecha LOCAL, no UTC
 function obtenerSemana(fecha) {
-    const d = new Date(fecha);
-    const dia = d.getDay() || 7;
-    const diff = d.getDate() - dia + 1;
-    const inicio = new Date(d.setDate(diff));
-    const fin = new Date(d.setDate(diff + 6));
+    const [año, mes, dia] = fecha.split('-').map(Number);
+    // Crear fecha a mediodía para evitar problemas de zona horaria
+    const d = new Date(año, mes - 1, dia, 12, 0, 0);
+    const diaSemana = d.getDay() || 7; // 1=Lunes, 7=Domingo
+    const diff = d.getDate() - diaSemana + 1;
+    
+    const inicio = new Date(d.getFullYear(), d.getMonth(), diff, 12, 0, 0);
+    const fin = new Date(d.getFullYear(), d.getMonth(), diff + 6, 12, 0, 0);
+    
+    const formatear = (date) => {
+        const a = date.getFullYear();
+        const m = String(date.getMonth() + 1).padStart(2, '0');
+        const dd = String(date.getDate()).padStart(2, '0');
+        return `${a}-${m}-${dd}`;
+    };
+    
     return {
-        inicio: inicio.toISOString().split('T')[0],
-        fin: fin.toISOString().split('T')[0]
+        inicio: formatear(inicio),
+        fin: formatear(fin)
     };
 }
 
@@ -3457,7 +3440,6 @@ function imprimirConFirmas(contenidoHTML, titulo = 'Reporte', fechaInicio = '', 
                         color: #000;
                     }
                     h1 { font-size: 12pt; text-align: center; margin-bottom: 5px; text-transform: uppercase; letter-spacing: 1px; }
-                    .subtitulo-print { text-align: center; font-size: 9pt; color: #333; margin-bottom: 8px; }
                     .fecha { text-align: right; font-size: 7pt; color: #555; margin-bottom: 8px; }
                     
                     .print-rango-fechas {
